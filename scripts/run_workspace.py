@@ -2,22 +2,23 @@
 CLI: Run workspace analysis on a prompt using a pre-fitted J-lens.
 
 Usage:
-    # First fit J-lens (once):
-    python scripts/compute_jlens.py --model Qwen/Qwen2.5-3B-Instruct
+    # Step 1 — fit J-lens for your target model (run once per model):
+    python scripts/compute_jlens.py --model Qwen/Qwen2.5-7B-Instruct --output outputs/jlens_qwen7b.pt
+    python scripts/compute_jlens.py --model meta-llama/Meta-Llama-3.1-8B-Instruct --output outputs/jlens_llama3_8b.pt
 
-    # Then analyse any prompt:
+    # Step 2 — analyse prompts:
     python scripts/run_workspace.py \
-        --model Qwen/Qwen2.5-3B-Instruct \
-        --jlens outputs/jlens.pt \
-        --prompt "A spider has 8 legs, so three spiders have" \
-        --save_dir outputs/figs/
+        --model Qwen/Qwen2.5-7B-Instruct \
+        --jlens outputs/jlens_qwen7b.pt \
+        --prompts_file configs/lang_pivot_prompts.txt \
+        --save_dir outputs/figs_qwen7b/
 
-    # Batch mode (one prompt per line in a file):
+    # Llama 3.1 8B (language pivot comparison):
     python scripts/run_workspace.py \
-        --model Qwen/Qwen2.5-3B-Instruct \
-        --jlens outputs/jlens.pt \
-        --prompts_file configs/prompts.txt \
-        --save_dir outputs/figs/
+        --model meta-llama/Meta-Llama-3.1-8B-Instruct \
+        --jlens outputs/jlens_llama3_8b.pt \
+        --prompts_file configs/lang_pivot_prompts.txt \
+        --save_dir outputs/figs_llama3_8b/
 """
 
 from __future__ import annotations
@@ -48,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Workspace analysis using a fitted J-lens.")
-    p.add_argument("--model", default="Qwen/Qwen2.5-3B-Instruct", help="HF model ID")
+    p.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct", help="HF model ID")
     p.add_argument("--jlens", default="outputs/jlens.pt", help="Path to saved J-lens .pt file")
     p.add_argument("--prompt", action="append", default=None, dest="prompts_inline", help="Prompt to analyse (can be repeated)")
     p.add_argument("--prompts_file", default=None, help="File with one prompt per line")

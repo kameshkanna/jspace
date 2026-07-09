@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Lambda Labs H100 setup — run once after cloning
 # Usage: bash setup.sh [MODEL_ID]
-# Default model: Qwen/Qwen2.5-3B-Instruct
+# Default model: Qwen/Qwen2.5-7B-Instruct
+# Other targets: meta-llama/Meta-Llama-3.1-8B-Instruct
 set -euo pipefail
 
-MODEL_ID="${1:-Qwen/Qwen2.5-3B-Instruct}"
+MODEL_ID="${1:-Qwen/Qwen2.5-7B-Instruct}"
 VENV_DIR=".venv"
 
 echo "=== jspace setup on Lambda Labs H100 ==="
@@ -49,5 +50,10 @@ EOF
 echo ""
 echo "=== Setup complete ==="
 echo "Activate venv:   source $VENV_DIR/bin/activate"
+echo ""
+echo "Targets supported:"
+echo "  Qwen/Qwen2.5-7B-Instruct          (default)"
+echo "  meta-llama/Meta-Llama-3.1-8B-Instruct"
+echo ""
 echo "Compute J-lens:  python scripts/compute_jlens.py --model $MODEL_ID"
 echo "Run workspace:   python scripts/run_workspace.py --model $MODEL_ID"

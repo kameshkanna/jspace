@@ -2,12 +2,18 @@
 CLI: Fit J-lens averaged Jacobians over a prompt corpus and save to disk.
 
 Usage:
+    # Qwen 7B (default):
     python scripts/compute_jlens.py \
-        --model Qwen/Qwen2.5-3B-Instruct \
-        --prompts_file configs/prompts.txt \
-        --output outputs/jlens_qwen25_3b.pt \
-        --n_prompts 100 \
-        --full_jacobian          # optional: full J, slower, more accurate
+        --model Qwen/Qwen2.5-7B-Instruct \
+        --output outputs/jlens_qwen7b.pt
+
+    # Llama 3.1 8B (English-dominant — language pivot comparison):
+    python scripts/compute_jlens.py \
+        --model meta-llama/Meta-Llama-3.1-8B-Instruct \
+        --output outputs/jlens_llama3_8b.pt
+
+    # Full Jacobian (accurate, needs >40GB VRAM):
+    python scripts/compute_jlens.py --full_jacobian
 """
 
 from __future__ import annotations
@@ -91,7 +97,7 @@ def load_prompts(prompts_file: Path, n_prompts: int) -> list[str]:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Fit J-lens Jacobians and save to disk.")
-    p.add_argument("--model", default="Qwen/Qwen2.5-3B-Instruct", help="HF model ID")
+    p.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct", help="HF model ID")
     p.add_argument("--prompts_file", default="configs/prompts.txt", help="One prompt per line")
     p.add_argument("--output", default="outputs/jlens.pt", help="Output .pt file")
     p.add_argument("--n_prompts", type=int, default=100, help="Max prompts to use")

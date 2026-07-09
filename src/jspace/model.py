@@ -21,7 +21,7 @@ class HookedModel:
     Parameters
     ----------
     model_id : str
-        HuggingFace model identifier (e.g. "Qwen/Qwen2.5-3B-Instruct").
+        HuggingFace model identifier (e.g. "Qwen/Qwen2.5-7B-Instruct").
     device : str | None
         Target device.  Defaults to "cuda" if available, else "cpu".
     dtype : torch.dtype
