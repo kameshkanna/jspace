@@ -2,27 +2,33 @@
 
 Open replication of the J-lens / Global Workspace paper
 ["Verbalizable Representations Form a Global Workspace in Language Models"](https://transformer-circuits.pub/2026/workspace/index.html)
-(Anthropic, 2026) — rebuilt from scratch for open HuggingFace models.
+(Lindsey et al., Anthropic 2026) — rebuilt from scratch for open HuggingFace models.
 
 ---
 
 ## What this does
 
 | Component | What it computes |
-|---|---|
-| `JacobianLens` | Averaged Jacobian readout vectors across a prompt corpus — "what is each position poised to say?" |
-| `WorkspaceAnalyzer` | Per-layer active concept count, entropy, variance explained, phase detection (Early / Workspace / Output) |
+| --- | --- |
+| `JacobianLens` | Full (d_model × d_model) averaged Jacobian matrices via Hutchinson VJP estimator |
+| `WorkspaceAnalyzer` | Per-layer active concept count (kurtosis), entropy, variance, phase detection |
 | `viz.py` | Layer profile, concept heatmap, capacity comparison plots |
+
+**Paper formula implemented:**
+```
+J_l = E_{t, t'>=t, prompt} [ dh_final_{t'} / dh_l_t ]
+lens(h_l) = softmax(W_U · norm(J_l @ h_l))
+```
 
 ---
 
-## Setup (Lambda Labs H100)
+## Setup (Lambda Labs H100 80GB)
 
 ```bash
 git clone <this-repo>
 cd jspace
-bash setup.sh                                      # Qwen 7B (default)
-bash setup.sh meta-llama/Meta-Llama-3.1-8B-Instruct   # or Llama 3.1 8B
+bash setup.sh                                           # Qwen 7B (default)
+bash setup.sh meta-llama/Meta-Llama-3.1-8B-Instruct    # or Llama 3.1 8B
 ```
 
 ---
@@ -32,13 +38,16 @@ bash setup.sh meta-llama/Meta-Llama-3.1-8B-Instruct   # or Llama 3.1 8B
 ```bash
 source .venv/bin/activate
 
-# Step 1 — fit J-lens (once per model, ~5–15 min on H100)
+# Step 1 — fit J-lens (once per model)
+# H100 80GB: ~15 min for 100 prompts x 32 layers x 16 projections
 python scripts/compute_jlens.py \
     --model Qwen/Qwen2.5-7B-Instruct \
+    --n_prompts 100 --n_proj 16 \
     --output outputs/jlens_qwen7b.pt
 
 python scripts/compute_jlens.py \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --n_prompts 100 --n_proj 16 \
     --output outputs/jlens_llama3_8b.pt
 
 # Step 2 — run workspace analysis
@@ -55,7 +64,38 @@ python scripts/run_workspace.py \
     --save_dir outputs/figs_llama3_8b
 ```
 
-Figures are saved under `outputs/figs_*/`.
+---
+
+## Python API
+
+```python
+from jspace import HookedModel, JacobianLens, WorkspaceAnalyzer
+
+model = HookedModel("Qwen/Qwen2.5-7B-Instruct")
+
+jlens = JacobianLens(model, n_proj=16, n_positions=4)
+jlens.fit(prompts, max_length=128)
+jlens.save("outputs/jlens_qwen7b.pt")
+
+analyzer = WorkspaceAnalyzer(jlens)
+report = analyzer.analyse("A spider has 8 legs, so three spiders have")
+
+WorkspaceAnalyzer.print_report(report)
+print(f"Workspace layers: {report.workspace_start}–{report.workspace_end}")
+print(f"Peak capacity: {report.peak_capacity} active positions")
+```
+
+---
+
+## Key flags
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `--n_proj` | 16 | Hutchinson projections; 16=fast, 32=paper quality |
+| `--n_positions` | 4 | Source token positions per prompt (paper: all) |
+| `--n_prompts` | 100 | More = better J averaging (paper uses 1000) |
+| `--kurtosis_threshold` | 0.0 | Excess kurtosis above this = active position |
+| `--var_threshold` | 0.05 | Min J-space variance fraction for workspace label |
 
 ---
 
@@ -63,24 +103,20 @@ Figures are saved under `outputs/figs_*/`.
 
 Any HuggingFace causal LM with the standard `model.layers` structure:
 - Qwen2 / Qwen2.5 family (default: 7B-Instruct)
-- LLaMA 2 / 3 / 3.1 (comparison: Meta-Llama-3.1-8B-Instruct)
+- LLaMA / Llama 3 / 3.1
 - Mistral / Mixtral
 - Gemma / Gemma2
 
-For GPT-2 / GPT-J / Falcon / OPT the layer path is auto-detected.
+GPT-2 / GPT-J / Falcon / OPT layer paths are auto-detected.
 
 ---
 
 ## Language pivot experiment
 
-The key experiment: does Qwen internally process in Chinese regardless of input language?
+Tests whether Qwen internally processes in Chinese regardless of input language.
 
 ```bash
-# Fit J-lens for both models
-python scripts/compute_jlens.py --model Qwen/Qwen2.5-7B-Instruct   --output outputs/jlens_qwen7b.pt
-python scripts/compute_jlens.py --model meta-llama/Meta-Llama-3.1-8B-Instruct --output outputs/jlens_llama3_8b.pt
-
-# Run the same multilingual prompts on both
+# Same 14 prompts (English, Chinese, Japanese) on both models
 python scripts/run_workspace.py \
     --model Qwen/Qwen2.5-7B-Instruct \
     --jlens outputs/jlens_qwen7b.pt \
@@ -98,38 +134,6 @@ Expected: Qwen middle layers show Chinese tokens on English input. Llama does no
 
 ---
 
-## Python API
-
-```python
-from jspace import HookedModel, JacobianLens, WorkspaceAnalyzer
-
-model = HookedModel("Qwen/Qwen2.5-7B-Instruct")
-
-jlens = JacobianLens(model, use_full_jacobian=False)
-jlens.fit(prompts, max_length=128)
-jlens.save("outputs/jlens_qwen7b.pt")
-
-analyzer = WorkspaceAnalyzer(jlens)  # entropy threshold auto-scaled to vocab
-report = analyzer.analyse("A spider has 8 legs, so three spiders have")
-
-WorkspaceAnalyzer.print_report(report)
-print(f"Workspace layers: {report.workspace_start}–{report.workspace_end}")
-print(f"Peak capacity: {report.peak_capacity} active positions")
-```
-
----
-
-## Key flags
-
-| Flag | Default | Notes |
-|---|---|---|
-| `--full_jacobian` | off | Full vocab Jacobian — accurate, needs ~40GB+ VRAM |
-| `--n_prompts` | 100 | More = better averaging, more time |
-| `--entropy_threshold` | auto | Auto-scaled to 60% of max vocab entropy; override manually if needed |
-| `--var_threshold` | 0.05 | Min J-space variance for workspace label |
-
----
-
 ## Connection to ManifoldSteer
 
 The paper finds **10–25 active concepts** in the workspace at any layer.
@@ -141,10 +145,11 @@ capacity (512) — the bottleneck between geometric headroom and observed utiliz
 
 ---
 
-## Estimated H100 cost
+## H100 80GB cost estimates
 
-| Model | Step | Time | VRAM |
-|---|---|---|---|
-| Qwen2.5-7B | `compute_jlens.py` (approx Jacobian, 35 prompts) | ~5–10 min | ~16 GB |
-| Llama-3.1-8B | `compute_jlens.py` (approx Jacobian, 35 prompts) | ~5–10 min | ~16 GB |
-| Either | `run_workspace.py` per prompt | ~45 sec | ~16 GB |
+| Model | n_prompts | n_proj | Time | VRAM |
+| --- | --- | --- | --- | --- |
+| 7–8B | 100 | 16 | ~15 min | ~20 GB |
+| 7–8B | 100 | 32 | ~30 min | ~20 GB |
+| 7–8B | 1000 | 16 | ~2.5 hrs | ~20 GB |
+| 7–8B per-prompt workspace run | — | — | ~45 sec | ~16 GB |
