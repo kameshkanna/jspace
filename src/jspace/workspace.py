@@ -91,17 +91,27 @@ class WorkspaceAnalyzer:
     def __init__(
         self,
         jlens: JacobianLens,
-        entropy_threshold: float = 3.0,
+        entropy_threshold: Optional[float] = None,
         var_threshold: float = 0.05,
         min_active_fraction: float = 0.3,
         top_k: int = 10,
     ) -> None:
         self.jlens = jlens
         self.model: HookedModel = jlens.model
-        self.entropy_threshold = entropy_threshold
         self.var_threshold = var_threshold
         self.min_active_fraction = min_active_fraction
         self.top_k = top_k
+
+        # auto-scale entropy threshold to vocab size:
+        # a "sharp" distribution should sit at ~25% of max entropy
+        import math
+        vocab_size = self.model.vocab_size()
+        max_entropy = math.log(vocab_size)  # nats
+        self.entropy_threshold = entropy_threshold if entropy_threshold is not None else max_entropy * 0.60
+        logger.info(
+            "Entropy threshold: %.2f nats  (vocab=%d, max_entropy=%.2f)",
+            self.entropy_threshold, vocab_size, max_entropy,
+        )
 
     # ── public API ──────────────────────────────────────────────────────────
 

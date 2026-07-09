@@ -5,10 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
+import warnings
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 import seaborn as sns
+
+# suppress missing-glyph warnings for CJK/non-latin tokens
+warnings.filterwarnings("ignore", message="Glyph.*missing from font")
 
 from jspace.workspace import WorkspaceReport
 

@@ -60,8 +60,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--entropy_threshold",
         type=float,
-        default=3.0,
-        help="Max entropy to count a position as 'active' (lower = stricter)",
+        default=None,
+        help="Max entropy (nats) to count a position as active. Default: auto (60%% of max vocab entropy)",
     )
     p.add_argument(
         "--var_threshold",
