@@ -1,32 +1,45 @@
 """
-Global Workspace analysis.
+Global Workspace analysis — paper-faithful implementation.
 
-Given a fitted JacobianLens and a prompt, this module:
-  1. Runs the prompt through the model and captures all residual states.
-  2. At each layer, projects every token position through J-lens to get
-     vocabulary readouts (the "active concepts").
-  3. Computes workspace capacity metrics:
-       - n_active      : number of positions with interpretable readout (entropy < threshold)
-       - var_explained : fraction of hidden-state variance in J-space
-       - layer_phase   : Early / Workspace / Output classification
-  4. Detects the workspace window (layers where n_active is high and stable).
+Paper (Lindsey et al., 2026) methodology:
 
-Terminology from the paper:
-  J-space       — the subspace spanned by J-lens vectors across positions
-  workspace     — layers where J-space carries verbalizable, causal content
-  capacity      — number of distinct concepts simultaneously active
+  Active concept detection:
+    A position is "active" if its J-lens readout is concentrated on a small
+    number of vocabulary tokens.  The paper uses EXCESS KURTOSIS of the
+    readout probability distribution as the primary signal — high kurtosis
+    means the distribution is spiky (one concept active), low kurtosis
+    means it is flat (no clear concept).
+
+    We threshold: position is active if kurtosis(readout_probs) > kurtosis_threshold.
+    Default threshold = 0  (excess kurtosis > 0 means heavier tail than Gaussian).
+
+  Workspace layer detection:
+    The paper identifies three phases by combining:
+      1. n_active  — count of positions above kurtosis threshold
+      2. Hunchback entropy profile — entropy rises early, dips in workspace
+      3. Variance explained by J-space direction
+
+    Workspace phase: layers where n_active is high (relative to model max) AND
+    entropy is in the valley (middle of the hunchback).
+
+  Readout formula (paper eq.):
+    lens(h_l) = softmax(W_U · norm(J_l @ h_l))
+
+  All of the above is computed using the J-lens matrices from JacobianLens,
+  which are (d_model x d_model) averaged Jacobian matrices.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from scipy.stats import entropy as scipy_entropy
+from scipy.stats import entropy as scipy_entropy, kurtosis as scipy_kurtosis
 
 from jspace.jlens import JacobianLens
 from jspace.model import HookedModel
@@ -39,10 +52,11 @@ class LayerWorkspaceStats:
     """Per-layer workspace statistics."""
 
     layer_idx: int
-    n_active: int                          # positions with clean J-lens readout
-    mean_entropy: float                    # mean token-distribution entropy across positions
-    var_explained: float                   # fraction of hidden-state variance in J-space
-    top_concepts: List[Tuple[str, float]]  # top active concepts at last position
+    n_active: int                          # positions with high-kurtosis J-lens readout
+    mean_entropy: float                    # mean entropy of J-lens readout distribution
+    mean_kurtosis: float                   # mean excess kurtosis across positions
+    var_explained: float                   # fraction of hidden-state variance in J-space direction
+    top_concepts: List[Tuple[str, float]]  # top concepts at last position (via J-lens readout)
     phase: str = ""                        # "Early" | "Workspace" | "Output"
 
 
@@ -62,55 +76,57 @@ class WorkspaceReport:
 
     @property
     def peak_capacity(self) -> int:
-        """Maximum n_active observed across workspace layers."""
         ws = self.workspace_layers
         return max(s.n_active for s in ws) if ws else 0
 
 
 class WorkspaceAnalyzer:
     """
-    Analyses the global workspace properties of a model on a given prompt.
+    Analyses global workspace properties of a model on a given prompt.
+
+    Uses paper-faithful readout: lens(h_l) = W_U(norm(J_l @ h_l))
+    and excess kurtosis as the active-concept detector.
 
     Parameters
     ----------
     jlens : JacobianLens
         Fitted J-lens (call jlens.fit() first).
-    entropy_threshold : float
-        Positions with J-space readout entropy below this are "active".
-        Lower = stricter.  Default 3.0 (nats) works for 32k–150k vocab models.
+        Must contain (d_model x d_model) matrices — not the old scalar vectors.
+    kurtosis_threshold : float
+        Excess kurtosis threshold for active detection.  Default 0 (heavier-
+        tailed than Gaussian).  Increase to be stricter.
+    entropy_threshold : float | None
+        Optional entropy upper bound (nats).  None = auto-scale to 60% of
+        max vocab entropy, used for phase detection only.
     var_threshold : float
-        Minimum fraction of variance in J-space for a layer to qualify
-        as "Workspace" phase.
-    min_active_fraction : float
-        Fraction of sequence positions that must be active for a layer
-        to be in the workspace zone.
+        Minimum fraction of variance in J-space direction for workspace label.
     top_k : int
-        Number of vocabulary tokens to report per position.
+        Top-k vocabulary tokens to report per position.
     """
 
     def __init__(
         self,
         jlens: JacobianLens,
+        kurtosis_threshold: float = 0.0,
         entropy_threshold: Optional[float] = None,
         var_threshold: float = 0.05,
-        min_active_fraction: float = 0.3,
         top_k: int = 10,
     ) -> None:
         self.jlens = jlens
         self.model: HookedModel = jlens.model
+        self.kurtosis_threshold = kurtosis_threshold
         self.var_threshold = var_threshold
-        self.min_active_fraction = min_active_fraction
         self.top_k = top_k
 
-        # auto-scale entropy threshold to vocab size:
-        # a "sharp" distribution should sit at ~25% of max entropy
-        import math
         vocab_size = self.model.vocab_size()
-        max_entropy = math.log(vocab_size)  # nats
-        self.entropy_threshold = entropy_threshold if entropy_threshold is not None else max_entropy * 0.60
+        max_entropy = math.log(vocab_size)
+        self.entropy_threshold = (
+            entropy_threshold if entropy_threshold is not None else max_entropy * 0.60
+        )
         logger.info(
-            "Entropy threshold: %.2f nats  (vocab=%d, max_entropy=%.2f)",
-            self.entropy_threshold, vocab_size, max_entropy,
+            "WorkspaceAnalyzer: kurtosis_threshold=%.2f  entropy_threshold=%.2f nats  "
+            "(vocab=%d, max_H=%.2f)",
+            self.kurtosis_threshold, self.entropy_threshold, vocab_size, max_entropy,
         )
 
     # ── public API ──────────────────────────────────────────────────────────
@@ -159,12 +175,7 @@ class WorkspaceAnalyzer:
             workspace_end=ws_end,
         )
 
-    def analyse_batch(
-        self,
-        prompts: List[str],
-        max_length: int = 128,
-    ) -> List[WorkspaceReport]:
-        """Run analyse() on multiple prompts."""
+    def analyse_batch(self, prompts: List[str], max_length: int = 128) -> List[WorkspaceReport]:
         return [self.analyse(p, max_length=max_length) for p in prompts]
 
     # ── internals ───────────────────────────────────────────────────────────
@@ -176,34 +187,54 @@ class WorkspaceAnalyzer:
         tokens: List[str],
     ) -> LayerWorkspaceStats:
         """
-        Compute workspace stats for one layer.
+        Compute workspace stats for one layer via paper-faithful J-lens readout.
 
         hs : (1, seq, d_model)
+
+        Active detection: kurtosis of J-lens readout probability distribution.
+        High kurtosis = concentrated on one concept = position is "active".
         """
         seq_len = hs.shape[1]
 
         entropies: List[float] = []
+        kurtoses: List[float] = []
         top_concepts_last: List[Tuple[str, float]] = []
 
         for pos in range(seq_len):
             h = hs[0, pos].to(self.model.device)  # (d_model,)
-            logits = self.model.unembed(h.unsqueeze(0).unsqueeze(0)).squeeze().detach()  # (vocab,)
+
+            # paper readout: W_U(norm(J_l @ h))
+            if layer_idx in self.jlens.avg_jacobians:
+                logits = self.jlens.readout_logits(h, layer_idx)  # (vocab,)
+            else:
+                # fallback: direct unembed (old behaviour)
+                logits = self.model.unembed(h.unsqueeze(0).unsqueeze(0)).squeeze().detach()
+
             probs = F.softmax(logits.float(), dim=-1).cpu().numpy()
             ent = float(scipy_entropy(probs))
+            # excess kurtosis (Fisher definition): 0 for Gaussian, >0 means heavy tail/spiky
+            kurt = float(scipy_kurtosis(probs, fisher=True, bias=False))
+
             entropies.append(ent)
+            kurtoses.append(kurt)
+
             if pos == seq_len - 1:
                 top_concepts_last = self.model.top_tokens(logits, k=self.top_k)
 
         mean_entropy = float(np.mean(entropies))
-        n_active = int(np.sum(np.array(entropies) < self.entropy_threshold))
+        mean_kurtosis = float(np.mean(kurtoses))
+        # active = positions whose readout is spiky (kurtosis above threshold)
+        n_active = int(np.sum(np.array(kurtoses) > self.kurtosis_threshold))
 
-        # variance explained by J-space direction
-        j_vec = self.jlens.avg_jacobians.get(layer_idx)
+        # variance explained by primary J-space direction at this layer
+        j_mat = self.jlens.avg_jacobians.get(layer_idx)
         var_explained = 0.0
-        if j_vec is not None:
-            hs_flat = hs[0].float().cpu()  # (seq, d_model)
-            j_unit = F.normalize(j_vec.float().cpu(), dim=0)  # (d_model,)
-            proj = hs_flat @ j_unit  # (seq,)
+        if j_mat is not None:
+            hs_flat = hs[0].float().cpu()                      # (seq, d_model)
+            # project each hidden state through J, take first principal direction
+            Jh = (j_mat.float() @ hs_flat.T).T                # (seq, d_model)
+            j_unit = F.normalize(Jh.mean(0).unsqueeze(0), dim=-1).squeeze()  # (d_model,)
+            proj = hs_flat @ j_unit                            # (seq,)
             var_proj = float(proj.var())
             var_total = float(hs_flat.var())
             var_explained = var_proj / (var_total + 1e-8)
@@ -212,40 +243,47 @@ class WorkspaceAnalyzer:
             layer_idx=layer_idx,
             n_active=n_active,
             mean_entropy=mean_entropy,
+            mean_kurtosis=mean_kurtosis,
             var_explained=var_explained,
             top_concepts=top_concepts_last,
         )
 
     def _assign_phases(self, stats: List[LayerWorkspaceStats]) -> None:
         """
-        Label each layer as Early / Workspace / Output using the hunchback
-        entropy profile from the paper.
+        Label each layer as Early / Workspace / Output.
 
-        Strategy:
-          1. Find the entropy minimum (most interpretable zone) — that anchors
-             the workspace centre.
-          2. Expand outward while entropy stays within a tolerance of the min.
-          3. The final 10% of layers are always Output (next-token collapse).
-          4. Everything else is Early.
+        Strategy (following paper's hunchback entropy profile):
+          1. Final 10% of layers → Output (next-token collapse zone).
+          2. Find the entropy valley (minimum) among non-output layers.
+          3. Layers within 40% of the entropy range above the minimum AND
+             whose n_active is above the median → Workspace.
+          4. Everything else → Early.
         """
         if not stats:
             return
 
         n_layers = len(stats)
         entropies = np.array([s.mean_entropy for s in stats])
+        n_actives = np.array([s.n_active for s in stats])
         output_cutoff = int(n_layers * 0.90)
 
-        min_ent = entropies.min()
-        max_ent = entropies.max()
-        ent_range = max(max_ent - min_ent, 1e-6)
-
-        # a layer is "workspace-like" if its entropy is within 40% of the
-        # full range above the minimum AND it is not in the output zone
-        tolerance = ent_range * 0.40
-        for i, s in enumerate(stats):
-            if s.layer_idx >= output_cutoff:
+        non_output_mask = np.array([s.layer_idx < output_cutoff for s in stats])
+        if non_output_mask.sum() == 0:
+            for s in stats:
                 s.phase = "Output"
-            elif entropies[i] <= min_ent + tolerance:
+            return
+
+        min_ent = entropies[non_output_mask].min()
+        max_ent = entropies[non_output_mask].max()
+        ent_range = max(max_ent - min_ent, 1e-6)
+        tolerance = ent_range * 0.40
+
+        median_active = float(np.median(n_actives[non_output_mask]))
+
+        for i, s in enumerate(stats):
+            if not non_output_mask[i]:
+                s.phase = "Output"
+            elif entropies[i] <= min_ent + tolerance and n_actives[i] >= median_active:
                 s.phase = "Workspace"
             else:
                 s.phase = "Early"
@@ -253,7 +291,6 @@ class WorkspaceAnalyzer:
     def _detect_workspace_window(
         self, stats: List[LayerWorkspaceStats]
     ) -> Tuple[int, int]:
-        """Return (start_layer, end_layer) of the workspace zone."""
         ws_indices = [s.layer_idx for s in stats if s.phase == "Workspace"]
         if not ws_indices:
             return -1, -1
@@ -263,7 +300,6 @@ class WorkspaceAnalyzer:
 
     @staticmethod
     def print_report(report: WorkspaceReport, max_layers: int = 30) -> None:
-        """Print a condensed human-readable workspace report."""
         try:
             from rich.console import Console
             from rich.table import Table
@@ -274,6 +310,7 @@ class WorkspaceAnalyzer:
             table.add_column("Phase", justify="center")
             table.add_column("n_active", justify="right")
             table.add_column("entropy", justify="right")
+            table.add_column("kurtosis", justify="right")
             table.add_column("var_expl", justify="right")
             table.add_column("Top concept", justify="left")
 
@@ -282,31 +319,31 @@ class WorkspaceAnalyzer:
                 phase_color = {"Early": "dim", "Workspace": "green", "Output": "yellow"}.get(
                     s.phase, "white"
                 )
-                top_tok = s.top_concepts[0][0] if s.top_concepts else "—"
+                top_tok = s.top_concepts[0][0] if s.top_concepts else "-"
                 table.add_row(
                     str(s.layer_idx),
                     f"[{phase_color}]{s.phase}[/{phase_color}]",
                     str(s.n_active),
                     f"{s.mean_entropy:.2f}",
+                    f"{s.mean_kurtosis:.1f}",
                     f"{s.var_explained:.3f}",
                     top_tok,
                 )
             console.print(table)
             console.print(
-                f"Workspace window: layers {report.workspace_start}–{report.workspace_end}  "
+                f"Workspace window: layers {report.workspace_start}-{report.workspace_end}  "
                 f"| Peak capacity: {report.peak_capacity} active positions"
             )
         except ImportError:
-            # fallback without rich
             print(f"\nWorkspace Analysis: {report.prompt[:60]}")
             for s in report.layer_stats[::max(1, len(report.layer_stats) // max_layers)]:
-                top_tok = s.top_concepts[0][0] if s.top_concepts else "—"
+                top_tok = s.top_concepts[0][0] if s.top_concepts else "-"
                 print(
                     f"  L{s.layer_idx:3d} [{s.phase:9s}]  "
                     f"n_active={s.n_active:3d}  H={s.mean_entropy:.2f}  "
-                    f"var={s.var_explained:.3f}  top={top_tok}"
+                    f"kurt={s.mean_kurtosis:.1f}  var={s.var_explained:.3f}  top={top_tok}"
                 )
             print(
-                f"\nWorkspace: layers {report.workspace_start}–{report.workspace_end}  "
+                f"\nWorkspace: layers {report.workspace_start}-{report.workspace_end}  "
                 f"peak_capacity={report.peak_capacity}"
             )

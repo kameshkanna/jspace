@@ -1,28 +1,42 @@
 """
-Jacobian Lens (J-lens) computation.
+Jacobian Lens (J-lens) — paper-faithful implementation.
 
-For each layer l and token position i, the J-lens vector is:
+Paper (Lindsey et al., 2026):
+    J_l = E_{t, t'>=t, prompt} [ dh_final_{t'} / dh_l_t ]
 
-    J̄[l, i] = E_{prompts} [ ∂ logits(next_token) / ∂ h[l, i] ]
+J_l is a (d_model x d_model) matrix: the averaged linearised map from
+an intermediate hidden state to the final transformer layer output.
 
-averaged over a corpus of diverse prompts.  This gives a context-free
-"readout direction" — projecting any hidden state onto J̄ tells you
-which vocabulary tokens that position is poised to generate.
+Readout (paper formula):
+    lens(h_l) = softmax(W_U  norm(J_l @ h_l))
 
-We use a memory-efficient approximation: instead of the full (vocab × d_model)
-Jacobian, we compute the gradient of a scalar summary statistic
-(entropy or top-token logit) w.r.t. each hidden state.  For the
-full avg-Jacobian we vectorize over vocabulary with vmap.
+We approximate J_l using the Hutchinson matrix estimator:
+for each Rademacher vector v ~ {+1,-1}^d_model,
+    grad(h_final_{t'} . v, h_l_t) = J_l^T @ v
+
+so:  J_l = E_v [ outer(v, J_l^T @ v) ]  (Rademacher identity, E[v v^T] = I)
+
+Implementation detail:
+    Each layer requires a SEPARATE forward pass so that h_final is computed
+    from h_l through the live computation graph.  Hooking multiple layers
+    simultaneously breaks the graph at each intermediate layer, making
+    backward through the whole stack impossible.
+
+    Cost on H100 80GB:
+        n_layers × n_prompts forward passes  (~35ms each for 7B)
+        + n_proj backward passes per (layer, prompt)  (~15ms each)
+    For 32 layers × 35 prompts × 16 projections ≈ 5 minutes.
+    For 32 layers × 100 prompts × 16 projections ≈ 15 minutes.
 """
 
 from __future__ import annotations
 
 import gc
 import logging
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -34,47 +48,43 @@ logger = logging.getLogger(__name__)
 
 class JacobianLens:
     """
-    Computes and caches the averaged Jacobian readout vectors (J-space)
-    for a HookedModel across a corpus of prompts.
+    Computes and caches the averaged Jacobian readout matrices (J-space).
 
     Parameters
     ----------
     model : HookedModel
     layer_indices : list[int] | None
-        Layers to analyse.  None = all layers.
+        Layers to compute J for.  None = all layers.
+    n_proj : int
+        Hutchinson projections per (prompt, position) pair.
+        16 is fast & good for workspace detection; 32 matches paper quality.
     top_k_vocab : int
-        Vocabulary tokens to track per position.
-    use_full_jacobian : bool
-        If True, compute the full (d_model × vocab) Jacobian via vmap —
-        accurate but memory-heavy.  If False, use gradient of top-1 logit
-        (fast approximation, good enough for workspace detection).
-    chunk_size : int
-        Number of vocab logits to differentiate per backward pass when
-        use_full_jacobian=True (reduces peak VRAM).
+        Vocabulary tokens to return per readout call.
+    n_positions : int
+        Number of tail positions to use as source per prompt
+        (paper averages over all t; 4 is a good practical compromise).
     """
 
     def __init__(
         self,
         model: HookedModel,
         layer_indices: Optional[List[int]] = None,
+        n_proj: int = 16,
         top_k_vocab: int = 20,
-        use_full_jacobian: bool = False,
-        chunk_size: int = 512,
+        n_positions: int = 4,
     ) -> None:
         self.model = model
         self.layer_indices: List[int] = (
             layer_indices if layer_indices is not None else list(range(model.num_layers))
         )
+        self.n_proj = n_proj
         self.top_k_vocab = top_k_vocab
-        self.use_full_jacobian = use_full_jacobian
-        self.chunk_size = chunk_size
+        self.n_positions = n_positions
 
-        # accumulated sums for online mean: {layer_idx: (sum_J, count)}
+        # {layer_idx: (sum_J_matrix (d,d), count)}
         self._accum: Dict[int, Tuple[torch.Tensor, int]] = {}
 
-        # final averaged Jacobians: {layer_idx: tensor(seq_len, d_model)}
-        # seq_len dimension is from last processed prompt — positions are
-        # aligned by taking the *last* token position (causal direction)
+        # {layer_idx: J_l (d_model, d_model)}
         self.avg_jacobians: Dict[int, torch.Tensor] = {}
 
     # ── public API ──────────────────────────────────────────────────────────
@@ -86,42 +96,53 @@ class JacobianLens:
         show_progress: bool = True,
     ) -> "JacobianLens":
         """
-        Compute averaged J-lens vectors over a list of prompts.
+        Compute averaged J-lens matrices over a corpus of prompts.
 
         Parameters
         ----------
         prompts : list[str]
-            Diverse corpus; more = better averaging.  50-200 is practical.
+            Diverse corpus.  100–1000 prompts (paper uses 1000).
         max_length : int
-            Truncation length for tokenization.
         show_progress : bool
-
-        Returns
-        -------
-        self (for chaining)
         """
+        d_model = self.model.model.config.hidden_size
+        n_layers = len(self.layer_indices)
         logger.info(
-            "Fitting J-lens over %d prompts, %d layers, full_jacobian=%s",
-            len(prompts),
-            len(self.layer_indices),
-            self.use_full_jacobian,
+            "Fitting J-lens: %d prompts x %d layers x %d projections  "
+            "(d_model=%d, n_positions=%d)",
+            len(prompts), n_layers, self.n_proj, d_model, self.n_positions,
         )
         self._accum.clear()
 
-        iterator = tqdm(prompts, desc="J-lens fit", disable=not show_progress, dynamic_ncols=True)
-        for prompt in iterator:
-            try:
-                self._process_prompt(prompt, max_length=max_length)
-            except torch.cuda.OutOfMemoryError:
-                logger.warning("OOM on prompt (skipped): %s", prompt[:60])
-                torch.cuda.empty_cache()
-                gc.collect()
+        pbar = tqdm(
+            total=len(prompts) * n_layers,
+            desc="J-lens fit",
+            disable=not show_progress,
+            dynamic_ncols=True,
+        )
 
-        # finalise means
+        for prompt in prompts:
+            enc = self.model.tokenize([prompt], max_length=max_length)
+            seq_len = int(enc["attention_mask"][0].sum()) if "attention_mask" in enc else enc["input_ids"].shape[1]
+            tgt_pos = seq_len - 1
+            src_positions = list(range(max(0, seq_len - self.n_positions), seq_len))
+
+            for layer_idx in self.layer_indices:
+                try:
+                    self._process_one_layer(enc, layer_idx, src_positions, tgt_pos)
+                except torch.cuda.OutOfMemoryError:
+                    logger.warning("OOM layer %d prompt %s (skipped)", layer_idx, prompt[:40])
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                pbar.update(1)
+
+        pbar.close()
+
         for layer_idx, (sum_j, count) in self._accum.items():
             self.avg_jacobians[layer_idx] = sum_j / max(count, 1)
 
-        logger.info("J-lens fit complete over %d layers", len(self.avg_jacobians))
+        logger.info("J-lens fit complete: %d layers, J shape: (%d, %d)",
+                    len(self.avg_jacobians), d_model, d_model)
         return self
 
     def readout(
@@ -131,64 +152,43 @@ class JacobianLens:
         k: int = 10,
     ) -> List[Tuple[str, float]]:
         """
-        Project a hidden state onto the averaged J-lens direction and
-        return top-k vocabulary tokens.
+        Paper readout formula: lens(h_l) = softmax(W_U norm(J_l @ h_l))
 
         Parameters
         ----------
-        hidden : torch.Tensor
-            Shape (d_model,) — a single position's hidden state.
+        hidden : (d_model,) hidden state at layer layer_idx
         layer_idx : int
-        k : int
+        k : int top-k tokens
 
         Returns
         -------
-        list of (token_str, score) sorted descending.
+        list of (token_str, prob) sorted descending
         """
-        if layer_idx not in self.avg_jacobians:
-            raise KeyError(f"Layer {layer_idx} not in fitted J-lens. Call fit() first.")
-
-        j_vec = self.avg_jacobians[layer_idx].to(hidden.device)  # (d_model,)
-        # dot product: scalar score per vocab direction
-        # j_vec shape is (d_model,); we interpret it as the readout direction
-        score = torch.einsum("d,d->", j_vec, hidden.float())
-        # For vocab-level readout, use unembed on the projected hidden
-        logits = self.model.unembed(hidden.unsqueeze(0).unsqueeze(0)).squeeze()  # (vocab,)
+        logits = self.readout_logits(hidden, layer_idx)
         return self.model.top_tokens(logits, k=k)
 
-    def readout_batch(
+    def readout_logits(
         self,
-        hidden_states: Dict[int, torch.Tensor],
-        k: int = 10,
-    ) -> Dict[int, List[List[Tuple[str, float]]]]:
+        hidden: torch.Tensor,
+        layer_idx: int,
+    ) -> torch.Tensor:
         """
-        Apply readout to a full set of captured hidden states.
+        Return full logit vector via paper readout: W_U(norm(J_l @ h_l)).
 
-        Parameters
-        ----------
-        hidden_states : dict mapping layer_idx → (batch, seq, d_model)
-        k : int
-
-        Returns
-        -------
-        dict mapping layer_idx → list[seq_len] of top-k token lists
+        The model's unembed() applies final layernorm then lm_head,
+        which implements norm(.) then W_U in sequence — matching the formula.
         """
-        results: Dict[int, List[List[Tuple[str, float]]]] = {}
-        for layer_idx, hs in hidden_states.items():
-            if layer_idx not in self.avg_jacobians:
-                continue
-            # hs shape: (batch, seq, d_model) — take first batch item
-            seq_results = []
-            for pos in range(hs.shape[1]):
-                h = hs[0, pos].to(self.model.device)  # (d_model,)
-                seq_results.append(self.readout(h, layer_idx, k=k))
-            results[layer_idx] = seq_results
-        return results
+        if layer_idx not in self.avg_jacobians:
+            raise KeyError(f"Layer {layer_idx} not in fitted J-lens.")
+        J = self.avg_jacobians[layer_idx].to(self.model.device)   # (d, d)
+        h = hidden.float().to(self.model.device)                   # (d,)
+        Jh = J @ h                                                 # (d,)
+        # unembed applies layernorm + W_U — the paper's norm(.) + W_U
+        return self.model.unembed(Jh.unsqueeze(0).unsqueeze(0)).squeeze().detach()
 
     # ── persistence ─────────────────────────────────────────────────────────
 
     def save(self, path: str | Path) -> None:
-        """Save averaged Jacobians to a .pt file."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
@@ -196,133 +196,135 @@ class JacobianLens:
                 "avg_jacobians": {k: v.cpu() for k, v in self.avg_jacobians.items()},
                 "layer_indices": self.layer_indices,
                 "model_id": self.model.model_id,
+                "n_proj": self.n_proj,
+                "n_positions": self.n_positions,
             },
             path,
         )
-        logger.info("Saved J-lens to %s", path)
+        logger.info("Saved J-lens (%d layers) to %s", len(self.avg_jacobians), path)
 
     @classmethod
     def load(cls, path: str | Path, model: HookedModel) -> "JacobianLens":
-        """Load averaged Jacobians from a saved .pt file."""
         data = torch.load(path, map_location="cpu", weights_only=True)
-        jl = cls(model, layer_indices=data["layer_indices"])
+        jl = cls(
+            model,
+            layer_indices=data["layer_indices"],
+            n_proj=data.get("n_proj", 16),
+            n_positions=data.get("n_positions", 4),
+        )
         jl.avg_jacobians = {k: v for k, v in data["avg_jacobians"].items()}
         logger.info("Loaded J-lens from %s (%d layers)", path, len(jl.avg_jacobians))
         return jl
 
     # ── internals ───────────────────────────────────────────────────────────
 
-    def _process_prompt(self, prompt: str, max_length: int) -> None:
+    def _process_one_layer(
+        self,
+        enc: Dict[str, torch.Tensor],
+        layer_idx: int,
+        src_positions: List[int],
+        tgt_pos: int,
+    ) -> None:
         """
-        Run one forward pass, compute Jacobians at each target layer,
-        and accumulate into self._accum.
+        Single forward pass with only layer_idx hooked for gradient.
+
+        The hook makes h_l a leaf tensor (requires_grad=True) while the
+        forward continues downstream — h_final is thus a function of h_l
+        and we can backprop through it.
+
+        We capture h_final at the last transformer block output (before
+        lm_head/norm) via a non-detaching hook on the final layer.
         """
-        enc = self.model.tokenize([prompt], max_length=max_length)
+        d_model = self.model.model.config.hidden_size
+        device = self.model.device
 
-        if self.use_full_jacobian:
-            self._process_full_jacobian(enc)
-        else:
-            self._process_gradient_approx(enc)
+        h_l_store: Dict[int, torch.Tensor] = {}
+        h_final_store: Dict[str, torch.Tensor] = {}
 
-    def _process_gradient_approx(self, enc: Dict[str, torch.Tensor]) -> None:
-        """
-        Fast approximation: gradient of the entropy of the output distribution
-        w.r.t. each layer's hidden state at the last non-pad token position.
+        # Hook layer_idx: make output a grad leaf, re-inject into graph
+        def grad_hook(module, _input, output, _idx=layer_idx):
+            hs = output[0] if isinstance(output, tuple) else output
+            clone = hs.clone().requires_grad_(True)
+            h_l_store[_idx] = clone
+            return (clone,) + output[1:] if isinstance(output, tuple) else clone
 
-        Entropy captures uncertainty across the full vocab without needing
-        the full Jacobian matrix — a single backward pass suffices.
-        """
-        with self.model.capture_residuals_with_grad(self.layer_indices) as store:
-            outputs = self.model.model(**enc)
+        # Hook final layer: store h_final WITHOUT detaching so grad flows through
+        final_idx = self.model.num_layers - 1
 
-        # find last real token position (ignore padding)
-        attention_mask = enc.get("attention_mask")
-        if attention_mask is not None:
-            last_pos = int(attention_mask[0].sum()) - 1
-        else:
-            last_pos = enc["input_ids"].shape[1] - 1
+        def final_hook(module, _input, output):
+            hs = output[0] if isinstance(output, tuple) else output
+            h_final_store["h"] = hs   # keep in graph — no detach
 
-        logits_last = outputs.logits[0, last_pos, :].float()  # (vocab,)
-        log_probs = F.log_softmax(logits_last, dim=-1)
-        probs = log_probs.exp()
-        # negative entropy — minimising this makes dist sharper
-        neg_entropy = (probs * log_probs).sum()
+        h1 = self.model._layers[layer_idx].register_forward_hook(grad_hook)
+        # only register final hook if layer_idx is not the last layer
+        h2 = None
+        if layer_idx < final_idx:
+            h2 = self.model._layers[final_idx].register_forward_hook(final_hook)
 
-        for layer_idx, hs in store.items():
-            if hs.grad_fn is None:
+        try:
+            with torch.enable_grad():
+                _ = self.model.model(**enc)
+        finally:
+            h1.remove()
+            if h2 is not None:
+                h2.remove()
+
+        if layer_idx not in h_l_store:
+            return
+
+        # if layer_idx is the last layer, use it as its own "final"
+        if layer_idx == final_idx:
+            h_final_store["h"] = h_l_store[layer_idx]
+
+        if "h" not in h_final_store:
+            return
+
+        h_final_seq = h_final_store["h"]  # (1, seq, d_model) — grad-enabled
+
+        # Hutchinson estimator over source positions
+        J_sum = torch.zeros(d_model, d_model, dtype=torch.float32, device="cpu")
+        n_accumulated = 0
+
+        for src_pos in src_positions:
+            if src_pos >= h_l_store[layer_idx].shape[1]:
                 continue
-            grad = torch.autograd.grad(
-                neg_entropy,
-                hs,
-                retain_graph=True,
-                create_graph=False,
-                allow_unused=True,
-            )[0]
-            if grad is None:
-                continue
-            # grad shape: (1, seq, d_model) — take last_pos
-            g = grad[0, last_pos].detach().float().cpu()  # (d_model,)
-            if layer_idx not in self._accum:
-                self._accum[layer_idx] = (g.clone(), 1)
-            else:
-                s, c = self._accum[layer_idx]
-                self._accum[layer_idx] = (s + g, c + 1)
+            h_src = h_l_store[layer_idx][0, src_pos]   # (d_model,) leaf with grad
 
-        # explicit cleanup
-        del outputs, logits_last, log_probs, probs, neg_entropy
-        torch.cuda.empty_cache()
-        gc.collect()
+            # Rademacher vectors: (n_proj, d_model)
+            vs = (torch.randint(0, 2, (self.n_proj, d_model), device=device).float() * 2 - 1)
 
-    def _process_full_jacobian(self, enc: Dict[str, torch.Tensor]) -> None:
-        """
-        Full Jacobian: ∂logits[last_pos, :] / ∂h[layer, last_pos, :].
-
-        Computed in vocab-chunks to bound peak VRAM.
-        Result is a (d_model,) vector averaged over vocab dimensions
-        (mean absolute Jacobian row — gives the most "influential" hidden dims).
-        """
-        attention_mask = enc.get("attention_mask")
-        if attention_mask is not None:
-            last_pos = int(attention_mask[0].sum()) - 1
-        else:
-            last_pos = enc["input_ids"].shape[1] - 1
-
-        vocab_size = self.model.vocab_size()
-
-        with self.model.capture_residuals_with_grad(self.layer_indices) as store:
-            outputs = self.model.model(**enc)
-
-        logits_last = outputs.logits[0, last_pos, :].float()  # (vocab,)
-
-        for layer_idx, hs in store.items():
-            if hs.grad_fn is None:
-                continue
-
-            d_model = hs.shape[-1]
-            jac_accum = torch.zeros(d_model, dtype=torch.float32)
-
-            # chunk over vocab to stay within VRAM budget
-            for v_start in range(0, vocab_size, self.chunk_size):
-                v_end = min(v_start + self.chunk_size, vocab_size)
-                chunk_sum = logits_last[v_start:v_end].sum()
+            for i in range(self.n_proj):
+                v = vs[i]  # (d_model,)
+                # scalar = h_final_{tgt_pos} . v
+                # grad w.r.t. h_src = J_l^T @ v
+                scalar = (h_final_seq[0, tgt_pos].float() * v).sum()
                 grad = torch.autograd.grad(
-                    chunk_sum,
-                    hs,
-                    retain_graph=True,
+                    scalar,
+                    h_src,
+                    retain_graph=(i < self.n_proj - 1 or src_pos != src_positions[-1]),
                     create_graph=False,
                     allow_unused=True,
                 )[0]
-                if grad is not None:
-                    jac_accum += grad[0, last_pos].detach().float().cpu().abs()
+                if grad is None:
+                    continue
+                g = grad.detach().float().cpu()   # J_l^T @ v, shape (d_model,)
+                # Hutchinson: E_v[outer(v, J^T v)] = E_v[v v^T J^T]^T ... see docs
+                # correct accumulation: outer(v, g) where g = J^T v  → estimates J
+                J_sum += torch.outer(v.cpu(), g)
+                n_accumulated += 1
 
-            g = jac_accum / vocab_size  # mean over vocab chunks
+        if n_accumulated == 0:
+            return
 
-            if layer_idx not in self._accum:
-                self._accum[layer_idx] = (g.clone(), 1)
-            else:
-                s, c = self._accum[layer_idx]
-                self._accum[layer_idx] = (s + g, c + 1)
+        J_estimate = J_sum / n_accumulated
 
-        del outputs, logits_last
+        if layer_idx not in self._accum:
+            self._accum[layer_idx] = (J_estimate, 1)
+        else:
+            s, c = self._accum[layer_idx]
+            self._accum[layer_idx] = (s + J_estimate, c + 1)
+
+        # free graph memory
+        del h_final_store, h_l_store
         torch.cuda.empty_cache()
         gc.collect()

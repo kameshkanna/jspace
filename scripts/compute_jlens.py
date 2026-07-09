@@ -1,19 +1,29 @@
 """
-CLI: Fit J-lens averaged Jacobians over a prompt corpus and save to disk.
+CLI: Fit J-lens (d_model x d_model) Jacobian matrices over a prompt corpus.
+
+Paper formula:  J_l = E_{t, t'>=t, prompt} [ dh_final_{t'} / dh_l_t ]
+Approximated via Hutchinson VJP estimator with n_proj Rademacher vectors.
 
 Usage:
-    # Qwen 7B (default):
+    # Qwen 7B (default), paper-faithful Jacobian matrices:
     python scripts/compute_jlens.py \
         --model Qwen/Qwen2.5-7B-Instruct \
-        --output outputs/jlens_qwen7b.pt
+        --output outputs/jlens_qwen7b.pt \
+        --n_prompts 100 --n_proj 16
 
-    # Llama 3.1 8B (English-dominant — language pivot comparison):
+    # Llama 3.1 8B:
     python scripts/compute_jlens.py \
         --model meta-llama/Meta-Llama-3.1-8B-Instruct \
-        --output outputs/jlens_llama3_8b.pt
+        --output outputs/jlens_llama3_8b.pt \
+        --n_prompts 100 --n_proj 16
 
-    # Full Jacobian (accurate, needs >40GB VRAM):
-    python scripts/compute_jlens.py --full_jacobian
+    # Higher quality (closer to paper's 1000 prompts):
+    python scripts/compute_jlens.py --n_prompts 1000 --n_proj 32
+
+H100 80GB cost estimates:
+    100 prompts x 32 layers x 16 proj  ~15 min   ~20 GB VRAM
+    100 prompts x 32 layers x 32 proj  ~30 min   ~20 GB VRAM
+    1000 prompts x 32 layers x 16 proj ~2.5 hrs  ~20 GB VRAM
 """
 
 from __future__ import annotations
@@ -110,11 +120,19 @@ def parse_args() -> argparse.Namespace:
         help="Layer indices to analyse (default: all)",
     )
     p.add_argument(
-        "--full_jacobian",
-        action="store_true",
-        help="Use full vocab Jacobian (accurate but slow, needs >40GB VRAM for 3B models)",
+        "--n_proj",
+        type=int,
+        default=16,
+        help="Hutchinson projections per (prompt, position) for J matrix estimation. "
+             "16=fast, 32=paper-quality. H100 80GB handles 32 fine.",
     )
-    p.add_argument("--chunk_size", type=int, default=512, help="Vocab chunk size for full Jacobian")
+    p.add_argument(
+        "--n_positions",
+        type=int,
+        default=4,
+        help="Number of tail token positions used as source per prompt. "
+             "Paper averages all positions; 4 is a good practical default.",
+    )
     return p.parse_args()
 
 
@@ -132,8 +150,8 @@ def main() -> None:
     jlens = JacobianLens(
         model=model,
         layer_indices=layer_indices,
-        use_full_jacobian=args.full_jacobian,
-        chunk_size=args.chunk_size,
+        n_proj=args.n_proj,
+        n_positions=args.n_positions,
     )
 
     jlens.fit(prompts, max_length=args.max_length, show_progress=True)

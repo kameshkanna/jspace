@@ -60,10 +60,18 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--max_length", type=int, default=128, help="Token truncation length")
     p.add_argument(
+        "--kurtosis_threshold",
+        type=float,
+        default=0.0,
+        help="Excess kurtosis threshold for active position detection (paper method). "
+             "Default 0 = heavier-tailed than Gaussian counts as active.",
+    )
+    p.add_argument(
         "--entropy_threshold",
         type=float,
         default=None,
-        help="Max entropy (nats) to count a position as active. Default: auto (60%% of max vocab entropy)",
+        help="Optional entropy upper bound (nats) — used for phase detection only. "
+             "Default: auto (60%% of max vocab entropy).",
     )
     p.add_argument(
         "--var_threshold",
@@ -113,6 +121,7 @@ def main() -> None:
 
     analyzer = WorkspaceAnalyzer(
         jlens=jlens,
+        kurtosis_threshold=args.kurtosis_threshold,
         entropy_threshold=args.entropy_threshold,
         var_threshold=args.var_threshold,
         top_k=args.top_k,
