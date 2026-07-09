@@ -212,6 +212,55 @@ class JacobianLens:
         h = hidden.float().to(self.model.device)
         return (J @ h).cpu()
 
+    def readout_logits_batch(
+        self,
+        hidden_seq: torch.Tensor,
+        layer_idx: int,
+    ) -> torch.Tensor:
+        """
+        Vectorized readout for a full sequence.
+
+        Parameters
+        ----------
+        hidden_seq : (seq, d_model) hidden states at layer layer_idx
+        layer_idx : int
+
+        Returns
+        -------
+        (seq, vocab_size) logit tensor (detached, CPU)
+        """
+        if layer_idx not in self.avg_jacobians:
+            raise KeyError(f"Layer {layer_idx} not in fitted J-lens.")
+        J = self.avg_jacobians[layer_idx].float().to(self.model.device)  # (d, d)
+        h = hidden_seq.float().to(self.model.device)                     # (seq, d)
+        Jh = (J @ h.T).T                                                 # (seq, d)
+        # unembed expects (..., d_model); pass (1, seq, d) → (1, seq, vocab)
+        logits = self.model.unembed(Jh.unsqueeze(0)).squeeze(0)         # (seq, vocab)
+        return logits.detach().cpu()
+
+    def readout_jh_batch(
+        self,
+        hidden_seq: torch.Tensor,
+        layer_idx: int,
+    ) -> torch.Tensor:
+        """
+        Vectorized J_l @ h for a full sequence.
+
+        Parameters
+        ----------
+        hidden_seq : (seq, d_model)
+        layer_idx : int
+
+        Returns
+        -------
+        (seq, d_model) projected vectors (CPU)
+        """
+        if layer_idx not in self.avg_jacobians:
+            raise KeyError(f"Layer {layer_idx} not in fitted J-lens.")
+        J = self.avg_jacobians[layer_idx].float()   # (d, d) on CPU
+        h = hidden_seq.float().cpu()                # (seq, d)
+        return (J @ h.T).T                          # (seq, d)
+
     # ── persistence ─────────────────────────────────────────────────────────
 
     def save(self, path: str | Path) -> None:

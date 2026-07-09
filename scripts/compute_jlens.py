@@ -110,7 +110,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct", help="HF model ID")
     p.add_argument("--prompts_file", default="configs/prompts.txt", help="One prompt per line")
     p.add_argument("--output", default="outputs/jlens.pt", help="Output .pt file")
-    p.add_argument("--n_prompts", type=int, default=100, help="Max prompts to use")
+    p.add_argument("--n_prompts", type=int, default=1000, help="Max prompts to use (paper: 1000)")
     p.add_argument("--max_length", type=int, default=128, help="Token truncation length")
     p.add_argument(
         "--layers",
@@ -122,9 +122,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--n_proj",
         type=int,
-        default=16,
-        help="Hutchinson projections per (prompt, position) for J matrix estimation. "
-             "16=fast, 32=paper-quality. H100 80GB handles 32 fine.",
+        default=32,
+        help="Hutchinson projections per (prompt, layer) for J matrix estimation. "
+             "32=paper-quality; 16=fast.",
     )
     return p.parse_args()
 

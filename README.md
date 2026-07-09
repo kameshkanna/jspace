@@ -10,15 +10,21 @@ Open replication of the J-lens / Global Workspace paper
 
 | Component | What it computes |
 | --- | --- |
-| `JacobianLens` | Full (d_model × d_model) averaged Jacobian matrices via Hutchinson VJP estimator; builds corpus J-lens vectors for gradient pursuit |
-| `WorkspaceAnalyzer` | Per-layer active concept count via gradient pursuit (min-k matching pursuit, 95% coverage), entropy, variance, phase detection |
+| `JacobianLens` | Full (d_model × d_model) averaged Jacobian matrices via Hutchinson VJP estimator; corpus J-lens vectors for gradient pursuit |
+| `WorkspaceAnalyzer` | Four paper signals: n_active (gradient pursuit), next_token_acc, pos_autocorr, kurtosis; 4-signal majority-vote phase detection |
 | `viz.py` | Layer profile, concept heatmap, capacity comparison plots |
 
-**Paper formula implemented:**
+**Paper formulas implemented:**
 
 ```text
-J_l = E_{t, t'>=t, prompt} [ dh_final_{t'} / dh_l_t ]
+J_l      = E_{t, t'>=t, prompt} [ dh_final_{t'} / dh_l_t ]
 lens(h_l) = softmax(W_U · norm(J_l @ h_l))
+
+Workspace signals (4-signal majority vote, >=3 required):
+  1. n_active    — min-k gradient pursuit, corpus J-lens vectors, 95% coverage
+  2. next_token_acc — argmax(lens(h_l_t)) == token_{t+1} accuracy
+  3. pos_autocorr — mean cosine similarity of adjacent readout distributions
+  4. entropy valley — mean_entropy in hunchback dip
 ```
 
 ---
@@ -40,15 +46,14 @@ bash setup.sh meta-llama/Meta-Llama-3.1-8B-Instruct    # or Llama 3.1 8B
 source .venv/bin/activate
 
 # Step 1 — fit J-lens (once per model)
-# H100 80GB: ~15 min for 100 prompts x 32 layers x 16 projections
+# H100 80GB: ~5 hrs for 1000 prompts x 32 layers x 32 projections (paper quality)
+# Use --n_prompts 100 --n_proj 16 for a ~15 min quick run
 python scripts/compute_jlens.py \
     --model Qwen/Qwen2.5-7B-Instruct \
-    --n_prompts 100 --n_proj 16 \
     --output outputs/jlens_qwen7b.pt
 
 python scripts/compute_jlens.py \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
-    --n_prompts 100 --n_proj 16 \
     --output outputs/jlens_llama3_8b.pt
 
 # Step 2 — run workspace analysis
@@ -92,9 +97,9 @@ print(f"Peak capacity: {report.peak_capacity} active positions")
 
 | Flag | Default | Notes |
 | --- | --- | --- |
-| `--n_proj` | 16 | Hutchinson projections; 16=fast, 32=paper quality |
-| `--n_prompts` | 100 | More = better J averaging (paper uses 1000) |
-| `--var_threshold` | 0.05 | Min J-space variance fraction for workspace label |
+| `--n_proj` | 32 | Hutchinson projections; 32=paper quality, 16=fast |
+| `--n_prompts` | 1000 | Corpus size; paper uses 1000 |
+| `--var_threshold` | 0.05 | Min J-space variance fraction (informational) |
 
 ---
 
@@ -151,5 +156,6 @@ capacity (512) — the bottleneck between geometric headroom and observed utiliz
 | --- | --- | --- | --- | --- |
 | 7–8B | 100 | 16 | ~15 min | ~20 GB |
 | 7–8B | 100 | 32 | ~30 min | ~20 GB |
+| 7–8B | 1000 | 32 | ~5 hrs | ~20 GB |
 | 7–8B | 1000 | 16 | ~2.5 hrs | ~20 GB |
 | 7–8B per-prompt workspace run | — | — | ~45 sec | ~16 GB |

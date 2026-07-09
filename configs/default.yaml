@@ -3,9 +3,9 @@ model:
   dtype: "bfloat16"
 
 jlens:
-  n_prompts: 100
+  n_prompts: 1000
   max_length: 128
-  n_proj: 16          # Hutchinson projections per (prompt, layer); 32 = paper quality
+  n_proj: 32          # Hutchinson projections per (prompt, layer); paper quality
 
 workspace:
   kurtosis_threshold: 0.0   # excess kurtosis; >0 = active position (paper metric)
