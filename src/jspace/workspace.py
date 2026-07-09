@@ -3,10 +3,13 @@ Global Workspace analysis — paper-faithful implementation.
 
 Paper (Lindsey et al., 2026) workspace detection uses FOUR signals per layer:
 
-  1. n_active  (gradient pursuit)
-     Minimum k corpus J-lens vectors whose nonneg linear combination explains
-     >=95% of J_l @ h_query norm-squared.  Averaged across sequence positions.
-     Falls back to excess-kurtosis count when corpus_jh is absent.
+  1. n_active  (sparse nonneg gradient pursuit — paper exact)
+     Minimum k corpus J-lens vectors, with nonneg coefficients, whose linear
+     combination explains >=95% of J_l @ h_query norm-squared.
+     Each step: pick corpus vector with highest POSITIVE dot to residual,
+     subtract with a = max(dot/||c||^2, 0).  Stops when max positive dot = 0.
+     Averaged across sequence positions.  Falls back to excess-kurtosis when
+     corpus_jh is absent (old .pt files).
 
   2. next_token_acc  (next-token prediction accuracy)
      Fraction of token positions t where argmax(lens(h_l_t)) == token_{t+1}.
@@ -296,7 +299,18 @@ class WorkspaceAnalyzer:
         layer_idx: int,
     ) -> np.ndarray:
         """
-        Run greedy matching pursuit independently for each sequence position.
+        Sparse nonneg gradient pursuit — paper-exact active-concept counting.
+
+        For each sequence position independently, find the minimum k unit-normed
+        corpus J-lens vectors {c_i} and nonneg coefficients {a_i >= 0} such that
+            ||query - sum_i a_i c_i||^2 / ||query||^2  <=  1 - pursuit_coverage
+
+        Algorithm (nonneg matching pursuit):
+          1. Pick corpus vector c* with highest POSITIVE dot product with residual.
+             If max positive dot <= 0, no further nonneg progress is possible → stop.
+          2. Compute coefficient  a = max(residual . c*, 0) / ||c*||^2  (nonneg clip).
+          3. Subtract  a * c*  from residual.
+          4. Repeat until coverage >= pursuit_coverage or _MAX_K steps reached.
 
         Parameters
         ----------
@@ -311,41 +325,54 @@ class WorkspaceAnalyzer:
         seq = jh_seq.shape[0]
         k_vals = np.zeros(seq, dtype=np.int32)
 
-        q_norms_sq = (jh_seq * jh_seq).sum(dim=-1)  # (seq,)
-        residuals  = jh_seq.clone()                  # (seq, d_model)
-        active     = (q_norms_sq > 1e-12).numpy()    # (seq,) bool mask — skip zero-norm
+        q_norms_sq = (jh_seq * jh_seq).sum(dim=-1)        # (seq,)
+        residuals  = jh_seq.clone()                        # (seq, d_model)
+        active     = (q_norms_sq > 1e-12).numpy()          # skip zero-norm positions
 
         for step in range(1, _MAX_K + 1):
             if not active.any():
                 break
 
-            # dot each active residual with all corpus vectors: (seq, n_corpus)
-            # only compute for still-active positions
             active_idx = np.where(active)[0]
-            r_active   = residuals[active_idx]                 # (n_active, d)
-            dots       = r_active @ corpus.T                   # (n_active, n_corpus)
-            best_idxs  = dots.abs().argmax(dim=1)              # (n_active,)
+            r_active   = residuals[active_idx]             # (n_active, d)
+            dots       = r_active @ corpus.T               # (n_active, n_corpus)
+
+            # nonneg constraint: only positively-correlated corpus vectors are eligible
+            dots_pos   = dots.clamp(min=0.0)               # (n_active, n_corpus)
+            max_dots   = dots_pos.max(dim=1)               # values (n_active,)
 
             for i, pos in enumerate(active_idx):
-                c = corpus[int(best_idxs[i])]                  # (d,)
-                c_norm_sq = float((c * c).sum())
+                if float(max_dots.values[i]) <= 1e-12:
+                    # no corpus vector has positive correlation — pursuit stalled
+                    k_vals[pos] = step - 1 if step > 1 else 0
+                    active[pos] = False
+                    continue
+
+                best_c_idx = int(max_dots.indices[i])
+                c = corpus[best_c_idx]                     # (d,)
+                c_norm_sq  = float((c * c).sum())
                 if c_norm_sq < 1e-12:
                     active[pos] = False
                     continue
-                proj = float((c * residuals[pos]).sum()) / c_norm_sq
+
+                # nonneg coefficient: clip to >= 0
+                proj = max(float((c * residuals[pos]).sum()) / c_norm_sq, 0.0)
                 residuals[pos] = residuals[pos] - proj * c
 
-            # check coverage for all active positions
-            residual_sq = (residuals[active_idx] * residuals[active_idx]).sum(dim=-1)
-            q_sq_active = q_norms_sq[active_idx]
-            explained   = 1.0 - residual_sq.numpy() / (q_sq_active.numpy() + 1e-12)
+            # recompute coverage for positions that are still active
+            still_active = np.where(active)[0]
+            if len(still_active) == 0:
+                break
+            res_sq  = (residuals[still_active] * residuals[still_active]).sum(dim=-1)
+            q_sq    = q_norms_sq[still_active]
+            covered = 1.0 - res_sq.numpy() / (q_sq.numpy() + 1e-12)
 
-            for i, pos in enumerate(active_idx):
-                if explained[i] >= self.pursuit_coverage:
+            for i, pos in enumerate(still_active):
+                if covered[i] >= self.pursuit_coverage:
                     k_vals[pos] = step
                     active[pos] = False
 
-        # positions that never converged get _MAX_K
+        # positions that never converged within _MAX_K steps
         k_vals[active] = _MAX_K
         return k_vals
 
