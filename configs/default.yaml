@@ -1,0 +1,19 @@
+model:
+  id: "Qwen/Qwen2.5-3B-Instruct"
+  dtype: "bfloat16"          # bfloat16 for H100, float32 for CPU
+
+jlens:
+  n_prompts: 100             # prompts used for averaging
+  max_length: 128            # token truncation
+  full_jacobian: false       # true = more accurate but needs ~40GB VRAM
+  chunk_size: 512            # vocab chunk size if full_jacobian=true
+
+workspace:
+  entropy_threshold: 3.0     # nats; lower = stricter "active" criterion
+  var_threshold: 0.05        # min J-space variance fraction for workspace label
+  min_active_fraction: 0.3   # fraction of seq positions that must be active
+  top_k: 10                  # top-k tokens to report per position
+
+output:
+  jlens_path: "outputs/jlens.pt"
+  figs_dir: "outputs/figs"
