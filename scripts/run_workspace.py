@@ -82,7 +82,7 @@ def collect_prompts(args: argparse.Namespace) -> list[str]:
         if not path.exists():
             logger.error("Prompts file not found: %s", path)
         else:
-            lines = [l.strip() for l in path.read_text().splitlines() if l.strip()]
+            lines = [l.strip() for l in path.read_text().splitlines() if l.strip() and not l.strip().startswith("#")]
             prompts.extend(lines)
     if not prompts:
         prompts = [
@@ -127,9 +127,11 @@ def main() -> None:
 
         # per-prompt figures
         slug = prompt[:40].replace(" ", "_").replace("/", "-")
-        plot_layer_profile(report, save_path=save_dir / f"layer_profile_{slug}.png")
+        fig = plot_layer_profile(report, save_path=save_dir / f"layer_profile_{slug}.png")
+        plt.close(fig)
         if report.workspace_layers:
-            plot_concept_heatmap(report, save_path=save_dir / f"concept_heatmap_{slug}.png")
+            fig2 = plot_concept_heatmap(report, save_path=save_dir / f"concept_heatmap_{slug}.png")
+            plt.close(fig2)
 
         logger.info(
             "  → workspace layers %d–%d | peak capacity %d",
@@ -141,11 +143,12 @@ def main() -> None:
     # summary capacity comparison
     if len(reports) > 1:
         labels = [p[:30] for p in prompts]
-        plot_capacity_comparison(
+        fig3 = plot_capacity_comparison(
             reports,
             labels=labels,
             save_path=save_dir / "capacity_comparison.png",
         )
+        plt.close(fig3)
         logger.info("Saved capacity comparison to %s", save_dir / "capacity_comparison.png")
 
     logger.info("All figures saved to %s", save_dir)
