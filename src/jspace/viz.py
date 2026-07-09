@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
@@ -13,12 +13,8 @@ import seaborn as sns
 from jspace.workspace import WorkspaceReport
 
 
-# ── palette ─────────────────────────────────────────────────────────────────
-
 _PHASE_COLORS = {"Early": "#7f8c8d", "Workspace": "#27ae60", "Output": "#e67e22"}
 
-
-# ── layer profile ────────────────────────────────────────────────────────────
 
 def plot_layer_profile(
     report: WorkspaceReport,
@@ -26,10 +22,7 @@ def plot_layer_profile(
     figsize: tuple = (14, 5),
 ) -> plt.Figure:
     """
-    Three-panel layer profile:
-      (a) n_active concepts across layers
-      (b) mean output-distribution entropy across layers
-      (c) variance explained by J-space direction
+    Three-panel layer profile: n_active, entropy, variance explained.
     Workspace zone is shaded green.
     """
     stats = report.layer_stats
@@ -40,9 +33,8 @@ def plot_layer_profile(
     phases = [s.phase for s in stats]
 
     fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=True)
-    fig.suptitle(f"Workspace Profile\n"{report.prompt[:70]}"", fontsize=11)
+    fig.suptitle(f'Workspace Profile -- "{report.prompt[:70]}"', fontsize=11)
 
-    # shade workspace zone across all panels
     ws_start = report.workspace_start
     ws_end = report.workspace_end
 
@@ -62,7 +54,6 @@ def plot_layer_profile(
         ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True, nbins=8))
         sns.despine(ax=ax)
 
-    # legend
     from matplotlib.patches import Patch
     handles = [Patch(color=c, label=p) for p, c in _PHASE_COLORS.items()]
     fig.legend(handles=handles, loc="upper right", fontsize=8, frameon=False)
@@ -72,8 +63,6 @@ def plot_layer_profile(
     return fig
 
 
-# ── concept heatmap ──────────────────────────────────────────────────────────
-
 def plot_concept_heatmap(
     report: WorkspaceReport,
     layer_indices: Optional[List[int]] = None,
@@ -81,11 +70,7 @@ def plot_concept_heatmap(
     save_path: Optional[str | Path] = None,
     figsize: tuple = (12, 8),
 ) -> plt.Figure:
-    """
-    Heatmap of top-concept scores across layers × top-N tokens.
-
-    Only workspace-zone layers are shown by default.
-    """
+    """Heatmap of top-concept scores across layers x top-N tokens."""
     ws_stats = (
         report.workspace_layers
         if layer_indices is None
@@ -94,8 +79,7 @@ def plot_concept_heatmap(
     if not ws_stats:
         ws_stats = report.layer_stats
 
-    # collect unique top tokens
-    all_tokens: Dict[str, int] = {}
+    all_tokens: dict[str, int] = {}
     for s in ws_stats:
         for tok, _ in s.top_concepts[:top_n]:
             if tok not in all_tokens:
@@ -120,7 +104,7 @@ def plot_concept_heatmap(
         linewidths=0.3,
         linecolor="#cccccc",
     )
-    ax.set_title(f"Active Concepts Across Workspace Layers\n"{report.prompt[:60]}"", fontsize=11)
+    ax.set_title(f'Active Concepts Across Workspace Layers -- "{report.prompt[:60]}"', fontsize=11)
     ax.set_xlabel("Token", fontsize=9)
     ax.set_ylabel("Layer", fontsize=9)
     ax.tick_params(axis="x", rotation=45, labelsize=7)
@@ -131,18 +115,13 @@ def plot_concept_heatmap(
     return fig
 
 
-# ── capacity summary bar ─────────────────────────────────────────────────────
-
 def plot_capacity_comparison(
     reports: List[WorkspaceReport],
     labels: Optional[List[str]] = None,
     save_path: Optional[str | Path] = None,
     figsize: tuple = (10, 4),
 ) -> plt.Figure:
-    """
-    Bar chart comparing peak workspace capacity across multiple prompts.
-    Useful for checking capacity vs your manifold ~512 geometric slots.
-    """
+    """Bar chart comparing peak workspace capacity across multiple prompts."""
     capacities = [r.peak_capacity for r in reports]
     xs = list(range(len(reports)))
     labs = labels if labels else [f"P{i}" for i in xs]
