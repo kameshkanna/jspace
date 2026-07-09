@@ -5,8 +5,7 @@ model:
 jlens:
   n_prompts: 100
   max_length: 128
-  n_proj: 16          # Hutchinson projections per (prompt, position); 32 = paper quality
-  n_positions: 4      # tail token positions used as source per prompt
+  n_proj: 16          # Hutchinson projections per (prompt, layer); 32 = paper quality
 
 workspace:
   kurtosis_threshold: 0.0   # excess kurtosis; >0 = active position (paper metric)

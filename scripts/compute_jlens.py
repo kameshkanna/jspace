@@ -126,13 +126,6 @@ def parse_args() -> argparse.Namespace:
         help="Hutchinson projections per (prompt, position) for J matrix estimation. "
              "16=fast, 32=paper-quality. H100 80GB handles 32 fine.",
     )
-    p.add_argument(
-        "--n_positions",
-        type=int,
-        default=4,
-        help="Number of tail token positions used as source per prompt. "
-             "Paper averages all positions; 4 is a good practical default.",
-    )
     return p.parse_args()
 
 
@@ -151,7 +144,6 @@ def main() -> None:
         model=model,
         layer_indices=layer_indices,
         n_proj=args.n_proj,
-        n_positions=args.n_positions,
     )
 
     jlens.fit(prompts, max_length=args.max_length, show_progress=True)

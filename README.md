@@ -10,12 +10,13 @@ Open replication of the J-lens / Global Workspace paper
 
 | Component | What it computes |
 | --- | --- |
-| `JacobianLens` | Full (d_model × d_model) averaged Jacobian matrices via Hutchinson VJP estimator |
-| `WorkspaceAnalyzer` | Per-layer active concept count (kurtosis), entropy, variance, phase detection |
+| `JacobianLens` | Full (d_model × d_model) averaged Jacobian matrices via Hutchinson VJP estimator; builds corpus J-lens vectors for gradient pursuit |
+| `WorkspaceAnalyzer` | Per-layer active concept count via gradient pursuit (min-k matching pursuit, 95% coverage), entropy, variance, phase detection |
 | `viz.py` | Layer profile, concept heatmap, capacity comparison plots |
 
 **Paper formula implemented:**
-```
+
+```text
 J_l = E_{t, t'>=t, prompt} [ dh_final_{t'} / dh_l_t ]
 lens(h_l) = softmax(W_U · norm(J_l @ h_l))
 ```
@@ -73,7 +74,7 @@ from jspace import HookedModel, JacobianLens, WorkspaceAnalyzer
 
 model = HookedModel("Qwen/Qwen2.5-7B-Instruct")
 
-jlens = JacobianLens(model, n_proj=16, n_positions=4)
+jlens = JacobianLens(model, n_proj=16)
 jlens.fit(prompts, max_length=128)
 jlens.save("outputs/jlens_qwen7b.pt")
 
@@ -92,9 +93,7 @@ print(f"Peak capacity: {report.peak_capacity} active positions")
 | Flag | Default | Notes |
 | --- | --- | --- |
 | `--n_proj` | 16 | Hutchinson projections; 16=fast, 32=paper quality |
-| `--n_positions` | 4 | Source token positions per prompt (paper: all) |
 | `--n_prompts` | 100 | More = better J averaging (paper uses 1000) |
-| `--kurtosis_threshold` | 0.0 | Excess kurtosis above this = active position |
 | `--var_threshold` | 0.05 | Min J-space variance fraction for workspace label |
 
 ---
@@ -102,6 +101,7 @@ print(f"Peak capacity: {report.peak_capacity} active positions")
 ## Supported models
 
 Any HuggingFace causal LM with the standard `model.layers` structure:
+
 - Qwen2 / Qwen2.5 family (default: 7B-Instruct)
 - LLaMA / Llama 3 / 3.1
 - Mistral / Mixtral

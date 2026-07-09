@@ -3,30 +3,29 @@ Global Workspace analysis — paper-faithful implementation.
 
 Paper (Lindsey et al., 2026) methodology:
 
-  Active concept detection:
-    A position is "active" if its J-lens readout is concentrated on a small
-    number of vocabulary tokens.  The paper uses EXCESS KURTOSIS of the
-    readout probability distribution as the primary signal — high kurtosis
-    means the distribution is spiky (one concept active), low kurtosis
-    means it is flat (no clear concept).
+  Active concept detection (gradient pursuit / sparse nonneg decomposition):
+    The paper finds the minimum k such that k "concept vectors" from the J-lens
+    corpus can reconstruct the query hidden state with >=95% explained variance.
+    n_active = k  (averaged across prompt positions).
 
-    We threshold: position is active if kurtosis(readout_probs) > kurtosis_threshold.
-    Default threshold = 0  (excess kurtosis > 0 means heavier tail than Gaussian).
+    Concretely:
+      1. corpus_jh[l] — normalised J_l @ h vectors from the fit corpus  (n_corpus, d_model)
+      2. query_jh = J_l @ h_query  (d_model,)
+      3. Greedy matching pursuit: at each step pick the corpus vector with highest
+         dot product with the current residual, subtract its projection, until
+         95% of the original norm-squared is explained.  k = number of steps.
+
+    The kurtosis proxy from the v1 implementation is kept as a fast fallback when
+    corpus_jh is absent (e.g. old .pt files).
 
   Workspace layer detection:
-    The paper identifies three phases by combining:
-      1. n_active  — count of positions above kurtosis threshold
+    Three phases determined by:
+      1. n_active (gradient pursuit count) per layer
       2. Hunchback entropy profile — entropy rises early, dips in workspace
       3. Variance explained by J-space direction
 
-    Workspace phase: layers where n_active is high (relative to model max) AND
-    entropy is in the valley (middle of the hunchback).
-
   Readout formula (paper eq.):
     lens(h_l) = softmax(W_U · norm(J_l @ h_l))
-
-  All of the above is computed using the J-lens matrices from JacobianLens,
-  which are (d_model x d_model) averaged Jacobian matrices.
 """
 
 from __future__ import annotations
@@ -46,13 +45,18 @@ from jspace.model import HookedModel
 
 logger = logging.getLogger(__name__)
 
+# Fraction of query norm-squared that must be explained to stop pursuit
+_PURSUIT_COVERAGE = 0.95
+# Maximum k before we give up (paper upper bound is ~25)
+_MAX_K = 30
+
 
 @dataclass
 class LayerWorkspaceStats:
     """Per-layer workspace statistics."""
 
     layer_idx: int
-    n_active: int                          # positions with high-kurtosis J-lens readout
+    n_active: int                          # min k from gradient pursuit (or kurtosis fallback)
     mean_entropy: float                    # mean entropy of J-lens readout distribution
     mean_kurtosis: float                   # mean excess kurtosis across positions
     var_explained: float                   # fraction of hidden-state variance in J-space direction
@@ -84,24 +88,26 @@ class WorkspaceAnalyzer:
     """
     Analyses global workspace properties of a model on a given prompt.
 
-    Uses paper-faithful readout: lens(h_l) = W_U(norm(J_l @ h_l))
-    and excess kurtosis as the active-concept detector.
+    Active concept detection uses gradient pursuit over the corpus J-lens
+    vectors when available, falling back to excess kurtosis when corpus_jh
+    is absent (old .pt files).
 
     Parameters
     ----------
     jlens : JacobianLens
         Fitted J-lens (call jlens.fit() first).
-        Must contain (d_model x d_model) matrices — not the old scalar vectors.
     kurtosis_threshold : float
-        Excess kurtosis threshold for active detection.  Default 0 (heavier-
-        tailed than Gaussian).  Increase to be stricter.
+        Kurtosis threshold used only when corpus_jh is absent (fallback).
     entropy_threshold : float | None
-        Optional entropy upper bound (nats).  None = auto-scale to 60% of
-        max vocab entropy, used for phase detection only.
+        Optional entropy upper bound for phase detection.
+        None = auto-scale to 60% of max vocab entropy.
     var_threshold : float
-        Minimum fraction of variance in J-space direction for workspace label.
+        Min variance fraction in J-space direction for workspace label.
     top_k : int
         Top-k vocabulary tokens to report per position.
+    pursuit_coverage : float
+        Fraction of norm-squared that must be explained by matching pursuit.
+        Default 0.95 (paper value).
     """
 
     def __init__(
@@ -111,22 +117,27 @@ class WorkspaceAnalyzer:
         entropy_threshold: Optional[float] = None,
         var_threshold: float = 0.05,
         top_k: int = 10,
+        pursuit_coverage: float = _PURSUIT_COVERAGE,
     ) -> None:
         self.jlens = jlens
         self.model: HookedModel = jlens.model
         self.kurtosis_threshold = kurtosis_threshold
         self.var_threshold = var_threshold
         self.top_k = top_k
+        self.pursuit_coverage = pursuit_coverage
+
+        has_corpus = bool(jlens.corpus_jh)
+        logger.info(
+            "WorkspaceAnalyzer: corpus_jh=%s  n_active_method=%s  pursuit_coverage=%.2f",
+            has_corpus,
+            "gradient_pursuit" if has_corpus else "kurtosis_fallback",
+            pursuit_coverage,
+        )
 
         vocab_size = self.model.vocab_size()
         max_entropy = math.log(vocab_size)
         self.entropy_threshold = (
             entropy_threshold if entropy_threshold is not None else max_entropy * 0.60
-        )
-        logger.info(
-            "WorkspaceAnalyzer: kurtosis_threshold=%.2f  entropy_threshold=%.2f nats  "
-            "(vocab=%d, max_H=%.2f)",
-            self.kurtosis_threshold, self.entropy_threshold, vocab_size, max_entropy,
         )
 
     # ── public API ──────────────────────────────────────────────────────────
@@ -191,14 +202,17 @@ class WorkspaceAnalyzer:
 
         hs : (1, seq, d_model)
 
-        Active detection: kurtosis of J-lens readout probability distribution.
-        High kurtosis = concentrated on one concept = position is "active".
+        n_active is computed via gradient pursuit when corpus_jh is available,
+        otherwise falls back to excess kurtosis count.
         """
         seq_len = hs.shape[1]
 
         entropies: List[float] = []
         kurtoses: List[float] = []
         top_concepts_last: List[Tuple[str, float]] = []
+        k_list: List[int] = []
+
+        corpus_available = layer_idx in self.jlens.corpus_jh
 
         for pos in range(seq_len):
             h = hs[0, pos].to(self.model.device)  # (d_model,)
@@ -207,12 +221,10 @@ class WorkspaceAnalyzer:
             if layer_idx in self.jlens.avg_jacobians:
                 logits = self.jlens.readout_logits(h, layer_idx)  # (vocab,)
             else:
-                # fallback: direct unembed (old behaviour)
                 logits = self.model.unembed(h.unsqueeze(0).unsqueeze(0)).squeeze().detach()
 
             probs = F.softmax(logits.float(), dim=-1).cpu().numpy()
             ent = float(scipy_entropy(probs))
-            # excess kurtosis (Fisher definition): 0 for Gaussian, >0 means heavy tail/spiky
             kurt = float(scipy_kurtosis(probs, fisher=True, bias=False))
 
             entropies.append(ent)
@@ -221,17 +233,27 @@ class WorkspaceAnalyzer:
             if pos == seq_len - 1:
                 top_concepts_last = self.model.top_tokens(logits, k=self.top_k)
 
+            # --- active detection ---
+            if corpus_available and layer_idx in self.jlens.avg_jacobians:
+                jh = self.jlens.readout_jh(h, layer_idx)  # (d_model,)
+                k = self._gradient_pursuit(jh, layer_idx)
+                k_list.append(k)
+
+        if k_list:
+            # average k across sequence positions — matches paper's per-layer aggregation
+            n_active = int(round(float(np.mean(k_list))))
+        else:
+            # fallback: kurtosis count (legacy behaviour)
+            n_active = int(np.sum(np.array(kurtoses) > self.kurtosis_threshold))
+
         mean_entropy = float(np.mean(entropies))
         mean_kurtosis = float(np.mean(kurtoses))
-        # active = positions whose readout is spiky (kurtosis above threshold)
-        n_active = int(np.sum(np.array(kurtoses) > self.kurtosis_threshold))
 
         # variance explained by primary J-space direction at this layer
         j_mat = self.jlens.avg_jacobians.get(layer_idx)
         var_explained = 0.0
         if j_mat is not None:
             hs_flat = hs[0].float().cpu()                      # (seq, d_model)
-            # project each hidden state through J, take first principal direction
             Jh = (j_mat.float() @ hs_flat.T).T                # (seq, d_model)
             j_unit = F.normalize(Jh.mean(0).unsqueeze(0), dim=-1).squeeze()  # (d_model,)
             proj = hs_flat @ j_unit                            # (seq,)
@@ -247,6 +269,53 @@ class WorkspaceAnalyzer:
             var_explained=var_explained,
             top_concepts=top_concepts_last,
         )
+
+    def _gradient_pursuit(self, query_jh: torch.Tensor, layer_idx: int) -> int:
+        """
+        Greedy matching pursuit: find minimum k corpus J-lens vectors needed
+        to explain >= pursuit_coverage of query_jh norm-squared.
+
+        Paper: "sparse nonneg gradient pursuit" — we use unconstrained matching
+        pursuit (signed dot product) as the standard operationalisation.
+
+        Parameters
+        ----------
+        query_jh : (d_model,) J_l @ h for the query position, already normalised
+        layer_idx : int
+
+        Returns
+        -------
+        k : int  (0 if query is zero-norm; up to _MAX_K if coverage not reached)
+        """
+        corpus = self.jlens.corpus_jh[layer_idx].float()  # (n_corpus, d_model)
+
+        q = query_jh.float()
+        q_norm_sq = float(q.dot(q))
+        if q_norm_sq < 1e-12:
+            return 0
+
+        residual = q.clone()
+        residual_sq = q_norm_sq
+
+        for k in range(1, _MAX_K + 1):
+            # pick corpus vector with maximum |dot product| with residual
+            dots = corpus @ residual               # (n_corpus,)
+            best_idx = int(torch.abs(dots).argmax())
+            c = corpus[best_idx]                   # (d_model,)
+
+            # project residual onto c and subtract
+            c_norm_sq = float(c.dot(c))
+            if c_norm_sq < 1e-12:
+                break
+            proj_scalar = float(c.dot(residual)) / c_norm_sq
+            residual = residual - proj_scalar * c
+            residual_sq = float(residual.dot(residual))
+
+            explained = 1.0 - residual_sq / q_norm_sq
+            if explained >= self.pursuit_coverage:
+                return k
+
+        return _MAX_K
 
     def _assign_phases(self, stats: List[LayerWorkspaceStats]) -> None:
         """
