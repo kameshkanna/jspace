@@ -250,7 +250,7 @@ class WorkspaceAnalyzer:
             from rich.table import Table
 
             console = Console()
-            table = Table(title=f"Workspace Analysis — "{report.prompt[:60]}"")
+            table = Table(title=f'Workspace Analysis -- "{report.prompt[:60]}"')
             table.add_column("Layer", justify="right")
             table.add_column("Phase", justify="center")
             table.add_column("n_active", justify="right")
