@@ -399,9 +399,14 @@ class WorkspaceAnalyzer:
             return
 
         n_layers = len(stats)
-        output_cutoff = max(int(n_layers * 0.90), n_layers - 1)
+        # Output zone = final 10% of layers by list position (not by layer_idx, which
+        # may be sparse or offset when only a subset of layers is analysed).
+        # At least 1 layer is always Output; at least 1 is always non-Output.
+        n_output = max(1, int(round(n_layers * 0.10)))
+        output_start_pos = n_layers - n_output        # list index of first Output layer
+        output_layer_ids = {s.layer_idx for s in stats[output_start_pos:]}
 
-        non_out = [s for s in stats if s.layer_idx < output_cutoff]
+        non_out = [s for s in stats if s.layer_idx not in output_layer_ids]
         if not non_out:
             for s in stats:
                 s.phase = "Output"
@@ -430,9 +435,8 @@ class WorkspaceAnalyzer:
         # candidates = layers with >= 3 votes
         candidate_set = {idx for idx, v in votes.items() if v >= 3}
 
-        # find largest contiguous run of candidates
-        # use the ordered layer indices (they may not be 0..n-1 if sparse)
-        ordered = [s.layer_idx for s in stats if s.layer_idx < output_cutoff]
+        # find largest contiguous run of candidates among non-output layers
+        ordered = [s.layer_idx for s in stats if s.layer_idx not in output_layer_ids]
         best_run: List[int] = []
         current_run: List[int] = []
         for idx in ordered:
@@ -447,7 +451,7 @@ class WorkspaceAnalyzer:
         workspace_set = set(best_run)
 
         for s in stats:
-            if s.layer_idx >= output_cutoff:
+            if s.layer_idx in output_layer_ids:
                 s.phase = "Output"
             elif s.layer_idx in workspace_set:
                 s.phase = "Workspace"

@@ -79,7 +79,7 @@ from jspace import HookedModel, JacobianLens, WorkspaceAnalyzer
 
 model = HookedModel("Qwen/Qwen2.5-7B-Instruct")
 
-jlens = JacobianLens(model, n_proj=16)
+jlens = JacobianLens(model, n_proj=32)  # 32 = paper quality
 jlens.fit(prompts, max_length=128)
 jlens.save("outputs/jlens_qwen7b.pt")
 

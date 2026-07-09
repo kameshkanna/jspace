@@ -5,25 +5,23 @@ Paper formula:  J_l = E_{t, t'>=t, prompt} [ dh_final_{t'} / dh_l_t ]
 Approximated via Hutchinson VJP estimator with n_proj Rademacher vectors.
 
 Usage:
-    # Qwen 7B (default), paper-faithful Jacobian matrices:
+    # Qwen 7B (default) — paper quality (1000 prompts, 32 proj):
     python scripts/compute_jlens.py \
         --model Qwen/Qwen2.5-7B-Instruct \
-        --output outputs/jlens_qwen7b.pt \
-        --n_prompts 100 --n_proj 16
+        --output outputs/jlens_qwen7b.pt
 
     # Llama 3.1 8B:
     python scripts/compute_jlens.py \
         --model meta-llama/Meta-Llama-3.1-8B-Instruct \
-        --output outputs/jlens_llama3_8b.pt \
-        --n_prompts 100 --n_proj 16
+        --output outputs/jlens_llama3_8b.pt
 
-    # Higher quality (closer to paper's 1000 prompts):
-    python scripts/compute_jlens.py --n_prompts 1000 --n_proj 32
+    # Fast smoke-test (~15 min):
+    python scripts/compute_jlens.py --n_prompts 100 --n_proj 16
 
 H100 80GB cost estimates:
-    100 prompts x 32 layers x 16 proj  ~15 min   ~20 GB VRAM
-    100 prompts x 32 layers x 32 proj  ~30 min   ~20 GB VRAM
-    1000 prompts x 32 layers x 16 proj ~2.5 hrs  ~20 GB VRAM
+    100 prompts  x 32 layers x 16 proj  ~15 min   ~20 GB VRAM
+    100 prompts  x 32 layers x 32 proj  ~30 min   ~20 GB VRAM
+    1000 prompts x 32 layers x 32 proj  ~5 hrs    ~20 GB VRAM  (default / paper quality)
 """
 
 from __future__ import annotations
