@@ -177,7 +177,7 @@ class WorkspaceAnalyzer:
 
         for pos in range(seq_len):
             h = hs[0, pos].to(self.model.device)  # (d_model,)
-            logits = self.model.unembed(h.unsqueeze(0).unsqueeze(0)).squeeze()  # (vocab,)
+            logits = self.model.unembed(h.unsqueeze(0).unsqueeze(0)).squeeze().detach()  # (vocab,)
             probs = F.softmax(logits.float(), dim=-1).cpu().numpy()
             ent = float(scipy_entropy(probs))
             entropies.append(ent)

@@ -205,7 +205,7 @@ class HookedModel:
         if norm is not None:
             hidden = norm(hidden.to(self.dtype))
 
-        return lm_head(hidden.to(self.dtype))
+        return lm_head(hidden.to(self.dtype)).detach()
 
     # ── vocab helpers ────────────────────────────────────────────────────────
 
@@ -215,11 +215,11 @@ class HookedModel:
         k: int = 10,
     ) -> List[Tuple[str, float]]:
         """Return top-k (token_str, prob) pairs from a logit vector."""
-        probs = torch.softmax(logits.float(), dim=-1)
+        probs = torch.softmax(logits.detach().float(), dim=-1)
         top_vals, top_ids = probs.topk(k)
         return [
             (self.tokenizer.decode([int(tid)]).strip(), float(val))
-            for tid, val in zip(top_ids, top_vals)
+            for tid, val in zip(top_ids.cpu(), top_vals.cpu())
         ]
 
     def vocab_size(self) -> int:
