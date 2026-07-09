@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Workspace analysis using a fitted J-lens.")
     p.add_argument("--model", default="Qwen/Qwen2.5-3B-Instruct", help="HF model ID")
     p.add_argument("--jlens", default="outputs/jlens.pt", help="Path to saved J-lens .pt file")
-    p.add_argument("--prompt", default=None, help="Single prompt to analyse")
+    p.add_argument("--prompt", action="append", default=None, dest="prompts_inline", help="Prompt to analyse (can be repeated)")
     p.add_argument("--prompts_file", default=None, help="File with one prompt per line")
     p.add_argument(
         "--save_dir",
@@ -75,8 +75,8 @@ def parse_args() -> argparse.Namespace:
 
 def collect_prompts(args: argparse.Namespace) -> list[str]:
     prompts: list[str] = []
-    if args.prompt:
-        prompts.append(args.prompt)
+    if args.prompts_inline:
+        prompts.extend(args.prompts_inline)
     if args.prompts_file:
         path = Path(args.prompts_file)
         if not path.exists():

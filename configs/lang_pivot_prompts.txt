@@ -1,0 +1,23 @@
+# English factual — should pivot to Chinese in middle layers for Qwen
+The capital of France is Paris, which is also known as the city of
+Albert Einstein was a physicist who developed the theory of relativity, which states that
+The mitochondria is the powerhouse of the cell because it produces ATP through a process called
+Water freezes at zero degrees Celsius and boils at one hundred degrees, which means that
+
+# English reasoning — does internal language affect reasoning steps?
+A spider has 8 legs. An insect has 6 legs. A centipede has 100 legs. Together they have
+If you have 3 apples and give away 1, then buy 5 more, the total number of apples you have is
+The fastest land animal is the cheetah which can run at 120 km/h, so in 30 minutes it covers
+
+# Emotional / social — often more training-data-language-dependent
+I feel extremely happy today because my best friend just told me that
+She was deeply saddened when she heard the news about
+The crowd erupted in joy when the final goal was scored and everyone started
+
+# Chinese prompt — expect cleaner workspace (dominant training language)
+巴黎是法国的首都，也是世界上最著名的城市之一，因为
+爱因斯坦是物理学家，他发现了相对论，这意味着
+如果你有三个苹果，给了一个朋友，又买了五个，那么你现在有
+
+# Japanese prompt
+パリはフランスの首都で、世界で最も有名な都市の一つです。なぜなら

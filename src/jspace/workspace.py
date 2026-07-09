@@ -218,26 +218,35 @@ class WorkspaceAnalyzer:
 
     def _assign_phases(self, stats: List[LayerWorkspaceStats]) -> None:
         """
-        Label each layer as Early / Workspace / Output based on
-        n_active fraction and variance explained.
+        Label each layer as Early / Workspace / Output using the hunchback
+        entropy profile from the paper.
 
-        The three-phase hunchback pattern from the paper:
-          Early     — entropy high, readouts noisy
-          Workspace — entropy lower, readouts interpretable, var_explained peaks
-          Output    — readouts collapse back to imminent next token
+        Strategy:
+          1. Find the entropy minimum (most interpretable zone) — that anchors
+             the workspace centre.
+          2. Expand outward while entropy stays within a tolerance of the min.
+          3. The final 10% of layers are always Output (next-token collapse).
+          4. Everything else is Early.
         """
         if not stats:
             return
 
         n_layers = len(stats)
-        seq_len_proxy = max(s.n_active for s in stats) or 1
+        entropies = np.array([s.mean_entropy for s in stats])
+        output_cutoff = int(n_layers * 0.90)
 
-        for s in stats:
-            active_frac = s.n_active / max(seq_len_proxy, 1)
-            if active_frac >= self.min_active_fraction and s.var_explained >= self.var_threshold:
-                s.phase = "Workspace"
-            elif s.layer_idx / n_layers > 0.85:
+        min_ent = entropies.min()
+        max_ent = entropies.max()
+        ent_range = max(max_ent - min_ent, 1e-6)
+
+        # a layer is "workspace-like" if its entropy is within 40% of the
+        # full range above the minimum AND it is not in the output zone
+        tolerance = ent_range * 0.40
+        for i, s in enumerate(stats):
+            if s.layer_idx >= output_cutoff:
                 s.phase = "Output"
+            elif entropies[i] <= min_ent + tolerance:
+                s.phase = "Workspace"
             else:
                 s.phase = "Early"
 
