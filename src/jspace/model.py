@@ -203,9 +203,9 @@ class HookedModel:
             or getattr(self.model.transformer, "ln_f", None)
         )
         if norm is not None:
-            hidden = norm(hidden)
+            hidden = norm(hidden.to(self.dtype))
 
-        return lm_head(hidden)
+        return lm_head(hidden.to(self.dtype))
 
     # ── vocab helpers ────────────────────────────────────────────────────────
 
