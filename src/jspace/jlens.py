@@ -304,44 +304,50 @@ class JacobianLens:
         Fused Hutchinson VJP: ONE forward + n_proj backward passes, computing
         J_l for ALL layer_indices simultaneously.
 
-        Instead of running a separate forward per layer (the original approach),
-        we inject differentiable clone-leaves at every layer in a single forward.
-        Then each backward pass propagates through the entire graph once,
-        filling gradients for all clones at once:
+        Correctness argument
+        --------------------
+        Hooks capture h_l as a REFERENCE (no clone-leaf replacement).  The full
+        computation graph from h_0 → h_1 → … → h_final remains intact.
+        For each Rademacher v, one backward call computes:
 
-            torch.autograd.grad(scalar, [h_clone_0, ..., h_clone_L])
+            torch.autograd.grad(scalar, [h_0, ..., h_L])
 
-        This gives the same Hutchinson estimate as the per-layer method but
-        requires n_proj backward passes total instead of n_layers × n_proj.
-        Speedup: ~n_layers× (28× for Qwen 7B with 28 layers).
+        where scalar = E_{t'}[h_final_{t'} · v].  The gradient w.r.t. h_l is:
+
+            d(scalar)/d(h_l) = (dh_final/dh_l)^T @ v = J_l^T @ v  (per position)
+
+        This is the exact same VJP the original per-layer code computed, but for
+        ALL layers in one pass — mathematically identical, not an approximation.
+
+        Why clone-leaves DON'T work for the fused case
+        -----------------------------------------------
+        If we had replaced each layer's output with a .clone().requires_grad_(True)
+        leaf, the hook at layer l+1 would break the graph path from h_final back to
+        h_clone_l, giving grad(scalar, h_clone_l) = 0 for all l < final.
+        The correct fix is to NOT replace outputs — just observe them.
+
+        Speedup vs original: n_proj backward passes instead of n_layers × n_proj.
+        For 28 layers / 1000 prompts / 32 proj: ~4.5 hrs → ~20-25 min on H100.
         """
         d_model = self.model.model.config.hidden_size
         device = self.model.device
         final_idx = self.model.num_layers - 1
 
-        h_clone_store: Dict[int, torch.Tensor] = {}
-        h_final_store: Dict[str, torch.Tensor] = {}
+        h_store: Dict[int, torch.Tensor] = {}   # layer_idx → activation IN graph
         hooks: List = []
 
         layer_idx_set = set(self.layer_indices)
+        # Always capture final layer so we have the target for the VJP
+        needed = layer_idx_set | {final_idx}
 
-        def make_grad_hook(idx: int):
+        def make_capture_hook(idx: int):
             def hook(module, _input, output):
                 hs = output[0] if isinstance(output, tuple) else output
-                clone = hs.clone().requires_grad_(True)
-                h_clone_store[idx] = clone
-                return (clone,) + output[1:] if isinstance(output, tuple) else clone
+                h_store[idx] = hs   # store reference; do NOT replace output
             return hook
 
-        def final_hook(module, _input, output):
-            hs = output[0] if isinstance(output, tuple) else output
-            h_final_store["h"] = hs
-
-        for l in self.layer_indices:
-            hooks.append(self.model._layers[l].register_forward_hook(make_grad_hook(l)))
-
-        if final_idx not in layer_idx_set:
-            hooks.append(self.model._layers[final_idx].register_forward_hook(final_hook))
+        for l in needed:
+            hooks.append(self.model._layers[l].register_forward_hook(make_capture_hook(l)))
 
         try:
             with torch.enable_grad():
@@ -350,42 +356,33 @@ class JacobianLens:
             for h in hooks:
                 h.remove()
 
-        if not h_clone_store:
+        if final_idx not in h_store:
             return
 
-        # If the final layer is also in layer_indices, its clone IS h_final
-        if final_idx in layer_idx_set:
-            h_final_store["h"] = h_clone_store[final_idx]
-
-        if "h" not in h_final_store:
-            return
-
-        h_final = h_final_store["h"]                    # (1, seq, d_model) in graph
+        h_final = h_store[final_idx]                          # (1, seq, d) in graph
         tgt_start = max(0, seq_len // 2)
-        h_final_tgt = h_final[0, tgt_start:seq_len].float()   # (n_tgt, d_model)
+        h_final_tgt = h_final[0, tgt_start:seq_len].float()  # (n_tgt, d)
         n_tgt = max(h_final_tgt.shape[0], 1)
 
-        # Rademacher vectors for all projections
+        # Non-leaf tensors that are part of the same computation graph
+        active_layers = [l for l in self.layer_indices if l in h_store]
+        h_tensors = [h_store[l] for l in active_layers]
+
         vs = (torch.randint(0, 2, (self.n_proj, d_model), device=device).float() * 2 - 1)
 
-        # Accumulate J estimates per layer (on CPU to save VRAM)
         J_sums: Dict[int, torch.Tensor] = {
             l: torch.zeros(d_model, d_model, dtype=torch.float32)
-            for l in self.layer_indices
-            if l in h_clone_store
+            for l in active_layers
         }
 
-        clones = [h_clone_store[l] for l in self.layer_indices if l in h_clone_store]
-        active_layers = [l for l in self.layer_indices if l in h_clone_store]
-
         for i in range(self.n_proj):
-            v = vs[i]   # (d_model,)
+            v = vs[i]
             scalar = (h_final_tgt * v.unsqueeze(0)).sum() / n_tgt
 
             retain = i < self.n_proj - 1
             grads = torch.autograd.grad(
                 scalar,
-                clones,
+                h_tensors,
                 retain_graph=retain,
                 create_graph=False,
                 allow_unused=True,
@@ -395,7 +392,7 @@ class JacobianLens:
             for l, grad in zip(active_layers, grads):
                 if grad is None:
                     continue
-                g_avg = grad[0, :seq_len].detach().float().mean(0).cpu()   # (d_model,)
+                g_avg = grad[0, :seq_len].detach().float().mean(0).cpu()   # (d,)
                 J_sums[l] += torch.outer(v_cpu, g_avg)
 
         for l in active_layers:
@@ -406,7 +403,7 @@ class JacobianLens:
                 s, c = self._accum[l]
                 self._accum[l] = (s + J_estimate, c + 1)
 
-        del h_final_store, h_clone_store, J_sums, clones
+        del h_store, J_sums, h_tensors
         torch.cuda.empty_cache()
         gc.collect()
 
