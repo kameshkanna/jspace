@@ -20,6 +20,11 @@ from jspace.workspace import WorkspaceReport
 _PHASE_COLORS = {"Early": "#7f8c8d", "Workspace": "#27ae60", "Output": "#e67e22"}
 
 
+def _safe_label(tok: str) -> str:
+    """Escape matplotlib special characters in token strings used as tick labels."""
+    return tok.replace("\\", "\\\\").replace("$", r"\$").replace("_", r"\_").replace("^", r"\^").replace("{", r"\{").replace("}", r"\}")
+
+
 def plot_layer_profile(
     report: WorkspaceReport,
     save_path: Optional[str | Path] = None,
@@ -37,7 +42,7 @@ def plot_layer_profile(
     phases = [s.phase for s in stats]
 
     fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=True)
-    fig.suptitle(f'Workspace Profile -- "{report.prompt[:70]}"', fontsize=11)
+    fig.suptitle(f'Workspace Profile -- "{_safe_label(report.prompt[:70])}"', fontsize=11)
 
     ws_start = report.workspace_start
     ws_end = report.workspace_end
@@ -100,7 +105,7 @@ def plot_concept_heatmap(
     fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
     sns.heatmap(
         matrix,
-        xticklabels=tokens_list,
+        xticklabels=[_safe_label(t) for t in tokens_list],
         yticklabels=[f"L{s.layer_idx}" for s in ws_stats],
         cmap="YlOrRd",
         ax=ax,
@@ -108,7 +113,7 @@ def plot_concept_heatmap(
         linewidths=0.3,
         linecolor="#cccccc",
     )
-    ax.set_title(f'Active Concepts Across Workspace Layers -- "{report.prompt[:60]}"', fontsize=11)
+    ax.set_title(f'Active Concepts Across Workspace Layers -- "{_safe_label(report.prompt[:60])}"', fontsize=11)
     ax.set_xlabel("Token", fontsize=9)
     ax.set_ylabel("Layer", fontsize=9)
     ax.tick_params(axis="x", rotation=45, labelsize=7)
@@ -134,7 +139,7 @@ def plot_capacity_comparison(
     bars = ax.bar(xs, capacities, color="#27ae60", alpha=0.85, width=0.6)
     ax.bar_label(bars, padding=3, fontsize=9)
     ax.set_xticks(xs)
-    ax.set_xticklabels(labs, rotation=30, ha="right", fontsize=8)
+    ax.set_xticklabels([_safe_label(l) for l in labs], rotation=30, ha="right", fontsize=8)
     ax.set_ylabel("Peak active concepts (n_active)", fontsize=10)
     ax.set_title("Workspace Capacity per Prompt", fontsize=11)
     ax.axhline(25, color="#e74c3c", linestyle="--", alpha=0.6, label="paper: ~25 cap")
