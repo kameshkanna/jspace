@@ -5,7 +5,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-outputs/
+outputs/*
+!outputs/.gitkeep
 *.pt
 *.safetensors
 .ipynb_checkpoints/

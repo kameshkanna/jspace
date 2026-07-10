@@ -480,14 +480,16 @@ class WorkspaceAnalyzer:
             table.add_column("nxt_acc",  justify="right")
             table.add_column("autocorr", justify="right")
             table.add_column("var_expl", justify="right")
-            table.add_column("Top concept", justify="left")
+            table.add_column("Top concepts", justify="left")
 
             step = max(1, len(report.layer_stats) // max_layers)
             for s in report.layer_stats[::step]:
                 color = {"Early": "dim", "Workspace": "green", "Output": "yellow"}.get(
                     s.phase, "white"
                 )
-                top_tok = s.top_concepts[0][0] if s.top_concepts else "-"
+                top_toks = ", ".join(
+                    f"{tok}({score:.3f})" for tok, score in s.top_concepts[:3]
+                ) if s.top_concepts else "-"
                 table.add_row(
                     str(s.layer_idx),
                     f"[{color}]{s.phase}[/{color}]",
@@ -497,7 +499,7 @@ class WorkspaceAnalyzer:
                     f"{s.next_token_acc:.2f}",
                     f"{s.pos_autocorr:.3f}",
                     f"{s.var_explained:.3f}",
-                    top_tok,
+                    top_toks,
                 )
             console.print(table)
             console.print(
@@ -507,14 +509,16 @@ class WorkspaceAnalyzer:
         except ImportError:
             print(f"\nWorkspace Analysis: {report.prompt[:60]}")
             for s in report.layer_stats[::max(1, len(report.layer_stats) // max_layers)]:
-                top = s.top_concepts[0][0] if s.top_concepts else "-"
+                top = ", ".join(
+                    f"{tok}({score:.3f})" for tok, score in s.top_concepts[:3]
+                ) if s.top_concepts else "-"
                 print(
                     f"  L{s.layer_idx:3d} [{s.phase:9s}]  "
                     f"n_active={s.n_active:2d}  H={s.mean_entropy:.2f}  "
                     f"kurt={s.mean_kurtosis:.1f}  "
                     f"nxt={s.next_token_acc:.2f}  "
                     f"ac={s.pos_autocorr:.3f}  "
-                    f"var={s.var_explained:.3f}  top={top}"
+                    f"var={s.var_explained:.3f}  top=[{top}]"
                 )
             print(
                 f"\nWorkspace: layers {report.workspace_start}–{report.workspace_end}  "

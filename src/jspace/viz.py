@@ -142,8 +142,7 @@ def plot_capacity_comparison(
     ax.set_xticklabels([_safe_label(l) for l in labs], rotation=30, ha="right", fontsize=8)
     ax.set_ylabel("Peak active concepts (n_active)", fontsize=10)
     ax.set_title("Workspace Capacity per Prompt", fontsize=11)
-    ax.axhline(25, color="#e74c3c", linestyle="--", alpha=0.6, label="paper: ~25 cap")
-    ax.axhline(512, color="#3498db", linestyle=":", alpha=0.5, label="manifold: ~512 geometric slots")
+    ax.axhline(25, color="#e74c3c", linestyle="--", alpha=0.6, label="paper upper bound (~25)")
     ax.legend(fontsize=8, frameon=False)
     sns.despine(ax=ax)
 
