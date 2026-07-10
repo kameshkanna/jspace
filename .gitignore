@@ -9,3 +9,18 @@ outputs/
 *.pt
 *.safetensors
 .ipynb_checkpoints/
+
+# model weights downloaded locally
+models/
+*.bin
+*.gguf
+
+# Lambda Labs / cloud session artifacts
+*.log
+nohup.out
+slurm-*.out
+
+# DS_Store and editor noise
+.DS_Store
+.idea/
+.vscode/
