@@ -1,8 +1,16 @@
 # jspace — Jacobian Lens & Global Workspace Replication
 
-Open replication of the J-lens / Global Workspace paper
-["Verbalizable Representations Form a Global Workspace in Language Models"](https://transformer-circuits.pub/2026/workspace/index.html)
-(Lindsey et al., Anthropic 2026) — rebuilt from scratch for open HuggingFace models.
+Open replication of **"Verbalizable Representations Form a Global Workspace in Language Models"**
+([Lindsey et al., Anthropic 2026](https://transformer-circuits.pub/2026/workspace/index.html))
+— rebuilt from scratch for open HuggingFace models.
+
+The paper shows transformer LMs form a **global workspace** in their middle layers: ~10–25
+simultaneously active concepts that are verbally interpretable and broadcast across the network.
+Models also think in their dominant pretraining language internally regardless of input language
+(Qwen in Chinese, Llama in English).
+
+This repo replicates both findings on Qwen2.5-7B and Llama-3.1-8B using the paper's exact
+Jacobian Lens formulation, Hutchinson VJP estimator, and 4-signal majority-vote workspace detector.
 
 ---
 
