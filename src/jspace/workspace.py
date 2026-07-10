@@ -32,10 +32,10 @@ Paper (Lindsey et al., 2026) workspace detection uses FOUR signals per layer:
 
   Phase assignment (4-signal majority vote):
      Each layer votes on 4 binary criteria:
-       - n_active >= median_active across layers          → 1 vote
-       - next_token_acc >= median_acc                     → 1 vote
-       - pos_autocorr >= median_autocorr                  → 1 vote
-       - mean_entropy <= min_entropy + 0.40 * entropy_range → 1 vote
+       - n_active > median_active across layers           → 1 vote  (strict >)
+       - next_token_acc > median_acc                      → 1 vote  (strict >, guards zero-median)
+       - pos_autocorr > median_autocorr                   → 1 vote  (strict >)
+       - mean_entropy <= min_entropy + 0.40 * entropy_range → 1 vote  (non-strict <=)
      Layers with >=3 votes become Workspace candidates.
      The largest contiguous run of Workspace candidates is kept;
      isolated outliers are pruned.
@@ -278,7 +278,9 @@ class WorkspaceAnalyzer:
             Jh = (j_mat.float() @ hs_flat.T).T                  # (seq, d)
             j_unit = F.normalize(Jh.mean(0, keepdim=True), dim=-1).squeeze(0)  # (d,)
             proj = hs_flat @ j_unit                              # (seq,)
-            var_explained = float(proj.var() / (hs_flat.var() + 1e-8))
+            # total variance = trace(Cov) = sum of per-dimension variances
+            total_var = float(hs_flat.var(dim=0).sum()) + 1e-8
+            var_explained = float(proj.var() / total_var)
 
         return LayerWorkspaceStats(
             layer_idx=layer_idx,
@@ -385,10 +387,10 @@ class WorkspaceAnalyzer:
         Output zone: final 10% of layers (next-token collapse zone) → always Output.
 
         For the remaining layers, each of the four signals casts a binary vote:
-          1. n_active >= median(n_active)
-          2. next_token_acc >= median(next_token_acc)
-          3. pos_autocorr >= median(pos_autocorr)
-          4. mean_entropy <= min_entropy + 0.40 * entropy_range   (valley signal)
+          1. n_active > median(n_active)
+          2. next_token_acc > median(next_token_acc)
+          3. pos_autocorr > median(pos_autocorr)
+          4. mean_entropy <= min_entropy + 0.40 * entropy_range   (valley signal; <= OK)
 
         Workspace candidate: >= 3 votes.
         Final workspace: largest contiguous run of candidates (ties broken by
@@ -424,11 +426,13 @@ class WorkspaceAnalyzer:
         med_autocorr = float(np.median(autocorrs))
 
         # build vote array for non-output layers
+        # Use strict > for continuous signals so degenerate cases (e.g. all-zero
+        # next_token_acc, median=0) don't award a free vote to every layer.
         votes: Dict[int, int] = {}
         for i, s in enumerate(non_out):
-            v  = int(n_actives[i]  >= med_active)
-            v += int(accs[i]       >= med_acc)
-            v += int(autocorrs[i]  >= med_autocorr)
+            v  = int(n_actives[i]  > med_active)
+            v += int(accs[i]       > med_acc)
+            v += int(autocorrs[i]  > med_autocorr)
             v += int(entropies[i]  <= min_ent + 0.40 * ent_range)
             votes[s.layer_idx] = v
 
