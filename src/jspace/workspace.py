@@ -47,7 +47,6 @@ Paper (Lindsey et al., 2026) workspace detection uses FOUR signals per layer:
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -116,12 +115,7 @@ class WorkspaceAnalyzer:
     jlens : JacobianLens
         Fitted J-lens (call jlens.fit() first).
     kurtosis_threshold : float
-        Used only as fallback n_active detector when corpus_jh is absent.
-    entropy_threshold : float | None
-        Optional entropy upper bound for entropy-valley signal.
-        None = auto 60% of max vocab entropy.
-    var_threshold : float
-        Minimum J-space variance fraction (informational; not used in phase vote).
+        Fallback n_active detector when corpus_jh is absent (old .pt files).
     top_k : int
         Top-k vocabulary tokens to report per position.
     pursuit_coverage : float
@@ -132,15 +126,12 @@ class WorkspaceAnalyzer:
         self,
         jlens: JacobianLens,
         kurtosis_threshold: float = 0.0,
-        entropy_threshold: Optional[float] = None,
-        var_threshold: float = 0.05,
         top_k: int = 10,
         pursuit_coverage: float = _PURSUIT_COVERAGE,
     ) -> None:
         self.jlens = jlens
         self.model: HookedModel = jlens.model
         self.kurtosis_threshold = kurtosis_threshold
-        self.var_threshold = var_threshold
         self.top_k = top_k
         self.pursuit_coverage = pursuit_coverage
 
@@ -150,12 +141,6 @@ class WorkspaceAnalyzer:
             has_corpus,
             "gradient_pursuit" if has_corpus else "kurtosis",
             pursuit_coverage,
-        )
-
-        vocab_size = self.model.vocab_size()
-        max_entropy = math.log(vocab_size)
-        self.entropy_threshold = (
-            entropy_threshold if entropy_threshold is not None else max_entropy * 0.60
         )
 
     # ── public API ────────────────────────────────────────────────────────────

@@ -141,41 +141,6 @@ class HookedModel:
             for h in handles:
                 h.remove()
 
-    @contextmanager
-    def capture_residuals_with_grad(
-        self,
-        layer_indices: Optional[List[int]] = None,
-    ) -> Iterator[Dict[int, torch.Tensor]]:
-        """
-        Like capture_residuals but retains gradients for Jacobian computation.
-        Tensors in the yielded dict have requires_grad=True.
-        """
-        target_indices = set(layer_indices) if layer_indices is not None else set(range(self.num_layers))
-        store: Dict[int, torch.Tensor] = {}
-        handles = []
-
-        for idx, layer in enumerate(self._layers):
-            if idx not in target_indices:
-                continue
-
-            def _hook(module: nn.Module, _input: tuple, output: tuple, _idx: int = idx) -> None:
-                hs = output[0] if isinstance(output, tuple) else output
-                # clone so we can attach grad without corrupting the forward pass
-                hs_clone = hs.clone().requires_grad_(True)
-                store[_idx] = hs_clone
-                # returning hs_clone re-wires the graph through this leaf
-                if isinstance(output, tuple):
-                    return (hs_clone,) + output[1:]
-                return hs_clone
-
-            handles.append(layer.register_forward_hook(_hook))
-
-        try:
-            yield store
-        finally:
-            for h in handles:
-                h.remove()
-
     # ── unembedding projection ───────────────────────────────────────────────
 
     def unembed(self, hidden: torch.Tensor) -> torch.Tensor:
