@@ -53,12 +53,12 @@ bash setup.sh meta-llama/Meta-Llama-3.1-8B-Instruct    # or Llama 3.1 8B
 ```bash
 source .venv/bin/activate
 
-# Step 1 — fit J-lens (once per model, ~25 min on H100 80GB)
+# Step 1 — fit J-lens (once per model)
 python scripts/compute_jlens.py \
     --model Qwen/Qwen2.5-7B-Instruct \
     --output outputs/jlens_qwen7b.pt
 
-# Use --n_prompts 100 --n_proj 16 for a ~3 min quick check
+# Use --n_prompts 100 --n_proj 16 for a quick check
 python scripts/compute_jlens.py \
     --model Qwen/Qwen2.5-7B-Instruct \
     --n_prompts 100 --n_proj 16 \
@@ -136,19 +136,6 @@ bash run_experiments.sh llama    # Llama only
 
 Both models think in their dominant pretraining language internally, regardless of input language.
 Full results and methodology: [results_qwen7b_vs_llama3_8b.txt](results_qwen7b_vs_llama3_8b.txt)
-
----
-
-## H100 80GB cost estimates
-
-| n_prompts | n_proj | J-lens fit | VRAM |
-| --- | --- | --- | --- |
-| 100 | 16 | ~3 min | ~20 GB |
-| 100 | 32 | ~6 min | ~20 GB |
-| 1000 | 16 | ~12 min | ~20 GB |
-| 1000 | 32 | ~25 min | ~20 GB |
-
-Workspace analysis per prompt: ~45 sec.
 
 ---
 

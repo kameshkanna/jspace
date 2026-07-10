@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Full paper-faithful replication run — Qwen2.5-7B + Llama-3.1-8B
-# Hardware: Lambda Labs H100 80GB (or any single 80GB GPU)
-# Total wall-clock: ~50-60 min (25 min per model for J-lens fit)
+# Hardware: any single 80GB GPU
 #
 # Usage:
 #   bash run_experiments.sh          # runs both models end to end
@@ -22,7 +21,7 @@ mkdir -p outputs/qwen7b outputs/llama3_8b
 if [[ "$TARGET" == "both" || "$TARGET" == "qwen" ]]; then
     echo "============================================================"
     echo "  QWEN2.5-7B — Step 1: fit J-lens (1000 prompts, 32 proj)"
-    echo "  Expected: ~25 min on H100 80GB"
+    echo "  Step 1: fit J-lens"
     echo "============================================================"
     python scripts/compute_jlens.py \
         --model Qwen/Qwen2.5-7B-Instruct \
@@ -34,7 +33,7 @@ if [[ "$TARGET" == "both" || "$TARGET" == "qwen" ]]; then
     echo ""
     echo "============================================================"
     echo "  QWEN2.5-7B — Step 2: workspace analysis (14 lang-pivot prompts)"
-    echo "  Expected: ~10 min"
+    echo "  Step 2: workspace analysis"
     echo "============================================================"
     python scripts/run_workspace.py \
         --model Qwen/Qwen2.5-7B-Instruct \
@@ -50,7 +49,7 @@ if [[ "$TARGET" == "both" || "$TARGET" == "llama" ]]; then
     echo ""
     echo "============================================================"
     echo "  LLAMA-3.1-8B — Step 1: fit J-lens (1000 prompts, 32 proj)"
-    echo "  Expected: ~25 min on H100 80GB"
+    echo "  Step 1: fit J-lens"
     echo "============================================================"
     python scripts/compute_jlens.py \
         --model meta-llama/Meta-Llama-3.1-8B-Instruct \
@@ -62,7 +61,7 @@ if [[ "$TARGET" == "both" || "$TARGET" == "llama" ]]; then
     echo ""
     echo "============================================================"
     echo "  LLAMA-3.1-8B — Step 2: workspace analysis (14 lang-pivot prompts)"
-    echo "  Expected: ~10 min"
+    echo "  Step 2: workspace analysis"
     echo "============================================================"
     python scripts/run_workspace.py \
         --model meta-llama/Meta-Llama-3.1-8B-Instruct \
