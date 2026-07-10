@@ -53,7 +53,6 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-from scipy.stats import entropy as scipy_entropy, kurtosis as scipy_kurtosis
 
 from jspace.jlens import JacobianLens
 from jspace.model import HookedModel
@@ -215,15 +214,25 @@ class WorkspaceAnalyzer:
 
         probs_seq = F.softmax(logits_seq.float(), dim=-1)  # (seq, vocab) cpu
 
-        # ── entropy and kurtosis ───────────────────────────────────────────
-        # scipy_entropy accepts (vocab,) arrays
-        probs_np = probs_seq.numpy()  # (seq, vocab)
-        entropies = np.array([float(scipy_entropy(probs_np[t])) for t in range(seq)])
-        kurtoses  = np.array([
-            float(scipy_kurtosis(probs_np[t], fisher=True, bias=False)) for t in range(seq)
-        ])
-        mean_entropy  = float(entropies.mean())
-        mean_kurtosis = float(kurtoses.mean())
+        # ── entropy and kurtosis (fully vectorized, no scipy) ─────────────
+        p = probs_seq.float()                                            # (seq, vocab)
+        log_p = torch.log(p.clamp(min=1e-40))                           # (seq, vocab)
+        entropies_t = -(p * log_p).sum(dim=-1)                          # (seq,)  H = -sum(p log p)
+
+        # excess kurtosis of the probability array (each p[i] treated as a data value)
+        # matches scipy.stats.kurtosis(p, fisher=True, bias=True)
+        mu_p   = p.mean(dim=-1, keepdim=True)          # (seq, 1)  = 1/V
+        dp     = p - mu_p                              # (seq, vocab)
+        var_p  = dp.pow(2).mean(dim=-1)                # (seq,)
+        m4_p   = dp.pow(4).mean(dim=-1)                # (seq,)
+        kurtoses_t = torch.where(
+            var_p > 1e-12, m4_p / var_p.pow(2) - 3.0, torch.zeros_like(var_p)
+        )                                              # (seq,)
+
+        entropies     = entropies_t.numpy()
+        kurtoses      = kurtoses_t.numpy()
+        mean_entropy  = float(entropies_t.mean().item())
+        mean_kurtosis = float(kurtoses_t.mean().item())
 
         # ── top concepts at last position ──────────────────────────────────
         top_concepts_last = self.model.top_tokens(logits_seq[-1].to(self.model.device), k=self.top_k)
@@ -308,60 +317,58 @@ class WorkspaceAnalyzer:
         -------
         k_vals : (seq,) int array — number of corpus vectors needed per position
         """
-        corpus = self.jlens.corpus_jh[layer_idx].float()  # (n_corpus, d_model) cpu
-        seq = jh_seq.shape[0]
-        k_vals = np.zeros(seq, dtype=np.int32)
+        corpus     = self.jlens.corpus_jh[layer_idx].float()  # (n_corpus, d)
+        c_norms_sq = (corpus * corpus).sum(dim=-1).clamp(min=1e-12)    # (n_corpus,)
 
-        q_norms_sq = (jh_seq * jh_seq).sum(dim=-1)        # (seq,)
-        residuals  = jh_seq.clone()                        # (seq, d_model)
-        active     = (q_norms_sq > 1e-12).numpy()          # skip zero-norm positions
+        seq        = jh_seq.shape[0]
+        k_vals     = torch.zeros(seq, dtype=torch.int32)
+        q_norms_sq = (jh_seq * jh_seq).sum(dim=-1)                     # (seq,)
+        residuals  = jh_seq.clone()                                     # (seq, d)
+        active     = q_norms_sq > 1e-12                                 # (seq,) bool tensor
 
         for step in range(1, _MAX_K + 1):
             if not active.any():
                 break
 
-            active_idx = np.where(active)[0]
-            r_active   = residuals[active_idx]             # (n_active, d)
-            dots       = r_active @ corpus.T               # (n_active, n_corpus)
+            # ── all active positions simultaneously ────────────────────────
+            a_idx   = active.nonzero(as_tuple=False).squeeze(1)        # (n_active,)
+            r_act   = residuals[a_idx]                                  # (n_active, d)
+            dots    = r_act @ corpus.T                                  # (n_active, n_corpus)
 
-            # nonneg constraint: only positively-correlated corpus vectors are eligible
-            dots_pos   = dots.clamp(min=0.0)               # (n_active, n_corpus)
-            max_dots   = dots_pos.max(dim=1)               # values (n_active,)
+            max_dot_vals, best_c = dots.clamp(min=0.0).max(dim=1)      # (n_active,)
 
-            for i, pos in enumerate(active_idx):
-                if float(max_dots.values[i]) <= 1e-12:
-                    # no corpus vector has positive correlation — pursuit stalled
-                    k_vals[pos] = step - 1 if step > 1 else 0
-                    active[pos] = False
-                    continue
+            # stalled: no positive dot → mark done
+            stalled       = max_dot_vals <= 1e-12                       # (n_active,) bool
+            stalled_pos   = a_idx[stalled]
+            k_vals[stalled_pos] = torch.clamp(
+                k_vals[stalled_pos], max=step - 1 if step > 1 else 0
+            )
+            active[stalled_pos] = False
 
-                best_c_idx = int(max_dots.indices[i])
-                c = corpus[best_c_idx]                     # (d,)
-                c_norm_sq  = float((c * c).sum())
-                if c_norm_sq < 1e-12:
-                    active[pos] = False
-                    continue
+            # still pursuing: vectorised residual update
+            go      = ~stalled                                          # (n_active,) bool
+            if not go.any():
+                continue
+            go_idx  = a_idx[go]                                        # (n_go,)
+            c_idx   = best_c[go]                                       # (n_go,) corpus indices
+            c_sel   = corpus[c_idx]                                    # (n_go, d)
+            proj    = ((residuals[go_idx] * c_sel).sum(dim=-1) /
+                       c_norms_sq[c_idx]).clamp(min=0.0)               # (n_go,) nonneg coeff
+            residuals[go_idx] -= proj.unsqueeze(1) * c_sel             # (n_go, d)
 
-                # nonneg coefficient: clip to >= 0
-                proj = max(float((c * residuals[pos]).sum()) / c_norm_sq, 0.0)
-                residuals[pos] = residuals[pos] - proj * c
-
-            # recompute coverage for positions that are still active
-            still_active = np.where(active)[0]
-            if len(still_active) == 0:
+            # check coverage for all still-active positions (including go_idx)
+            still   = active.nonzero(as_tuple=False).squeeze(1)
+            if still.numel() == 0:
                 break
-            res_sq  = (residuals[still_active] * residuals[still_active]).sum(dim=-1)
-            q_sq    = q_norms_sq[still_active]
-            covered = 1.0 - res_sq.numpy() / (q_sq.numpy() + 1e-12)
+            res_sq  = (residuals[still] * residuals[still]).sum(dim=-1)
+            covered = 1.0 - res_sq / (q_norms_sq[still] + 1e-12)
+            done_mask        = covered >= self.pursuit_coverage
+            done_pos         = still[done_mask]
+            k_vals[done_pos] = step
+            active[done_pos] = False
 
-            for i, pos in enumerate(still_active):
-                if covered[i] >= self.pursuit_coverage:
-                    k_vals[pos] = step
-                    active[pos] = False
-
-        # positions that never converged within _MAX_K steps
         k_vals[active] = _MAX_K
-        return k_vals
+        return k_vals.numpy()
 
     # ── phase assignment (4-signal majority vote) ─────────────────────────────
 
