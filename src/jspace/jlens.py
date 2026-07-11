@@ -32,12 +32,6 @@ Fused Hutchinson VJP estimator (all layers per prompt):
         Fused:     n_prompts × n_proj backward passes  (~n_layers× faster)
         28 layers, 1000 prompts, 32 proj:  ~4.5 hrs → ~20-25 min on H100
 
-Cost on H100 80GB (7B model, d_model=3584):
-    Forward pass:  ~50 ms
-    Backward pass: ~200 ms  (all layers simultaneously)
-    1000 prompts × 32 proj = 32 K backwards ≈ 20-25 min  (paper quality)
-    J storage: 28 layers × 3584^2 × 4 B ≈ 1.4 GB
-    Corpus jh:  28 layers × n_prompts × 3584 × 4 B ≈ 400 MB (for 1000 prompts)
 """
 
 from __future__ import annotations
@@ -265,23 +259,42 @@ class JacobianLens:
 
     # ── persistence ─────────────────────────────────────────────────────────
 
-    def save(self, path: str | Path) -> None:
+    def save(self, path: str | Path, n_prompts: int = 0, max_length: int = 128) -> None:
+        import datetime
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        d_model = self.model.model.config.hidden_size
+        corpus_size = (
+            next(iter(self.corpus_jh.values())).shape[0] if self.corpus_jh else 0
+        )
         torch.save(
             {
+                # ── lens matrices ──────────────────────────────────────────
                 "avg_jacobians": {k: v.cpu() for k, v in self.avg_jacobians.items()},
-                "corpus_jh": {k: v.cpu() for k, v in self.corpus_jh.items()},
+                "corpus_jh":     {k: v.cpu() for k, v in self.corpus_jh.items()},
+                # ── fit config ────────────────────────────────────────────
                 "layer_indices": self.layer_indices,
-                "model_id": self.model.model_id,
-                "n_proj": self.n_proj,
+                "model_id":      self.model.model_id,
+                "n_proj":        self.n_proj,
+                "n_prompts":     n_prompts,
+                "max_length":    max_length,
+                # ── derived metadata ──────────────────────────────────────
+                "d_model":       d_model,
+                "n_layers":      len(self.avg_jacobians),
+                "corpus_size":   corpus_size,
+                # ── provenance ────────────────────────────────────────────
+                "version":       "2.0",
+                "source":        "https://github.com/kameshkanna/jspace",
+                "paper":         "Lindsey et al., Anthropic 2026 — https://transformer-circuits.pub/2026/workspace/index.html",
+                "license":       "MIT",
+                "created_at":    datetime.datetime.utcnow().isoformat() + "Z",
             },
             path,
         )
-        logger.info("Saved J-lens (%d layers, %d corpus vecs) to %s",
-                    len(self.avg_jacobians),
-                    sum(v.shape[0] for v in self.corpus_jh.values()) // max(len(self.corpus_jh), 1),
-                    path)
+        logger.info(
+            "Saved J-lens v2.0 — model=%s  layers=%d  d_model=%d  n_proj=%d  corpus=%d  → %s",
+            self.model.model_id, len(self.avg_jacobians), d_model, self.n_proj, corpus_size, path,
+        )
 
     @classmethod
     def load(cls, path: str | Path, model: HookedModel) -> "JacobianLens":

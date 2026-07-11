@@ -15,13 +15,8 @@ Usage:
         --model meta-llama/Meta-Llama-3.1-8B-Instruct \
         --output outputs/jlens_llama3_8b.pt
 
-    # Fast smoke-test (~15 min):
+    # Fast smoke-test (reduced corpus):
     python scripts/compute_jlens.py --n_prompts 100 --n_proj 16
-
-H100 80GB cost estimates:
-    100 prompts  x 32 layers x 16 proj  ~15 min   ~20 GB VRAM
-    100 prompts  x 32 layers x 32 proj  ~30 min   ~20 GB VRAM
-    1000 prompts x 32 layers x 32 proj  ~5 hrs    ~20 GB VRAM  (default / paper quality)
 """
 
 from __future__ import annotations
@@ -145,7 +140,7 @@ def main() -> None:
     )
 
     jlens.fit(prompts, max_length=args.max_length, show_progress=True)
-    jlens.save(output_path)
+    jlens.save(output_path, n_prompts=len(prompts), max_length=args.max_length)
 
     logger.info("Done. Saved to %s", output_path)
 
