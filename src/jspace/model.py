@@ -43,21 +43,71 @@ class HookedModel:
         self.max_new_tokens = max_new_tokens
 
         logger.info("Loading tokenizer: %s", model_id)
-        self.tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(model_id)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
 
         logger.info("Loading model: %s  device=%s  dtype=%s", model_id, self.device, self.dtype)
-        self.model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
+        model = AutoModelForCausalLM.from_pretrained(
             model_id,
             torch_dtype=self.dtype,
             device_map=self.device,
         )
+        self._attach(model, tokenizer)
+
+    @classmethod
+    def from_components(
+        cls,
+        model: PreTrainedModel,
+        tokenizer: PreTrainedTokenizerBase,
+        model_id: str = "in-memory",
+        max_new_tokens: int = 128,
+    ) -> "HookedModel":
+        """
+        Wrap an already-instantiated model and tokenizer without touching the Hub.
+
+        Device and dtype are inferred from the model's parameters.  Intended for
+        dependency injection of small or randomly initialised models in tests.
+
+        Parameters
+        ----------
+        model : PreTrainedModel
+            Instantiated causal LM.
+        tokenizer : PreTrainedTokenizerBase
+            Matching tokenizer.
+        model_id : str
+            Identifier recorded in saved lens metadata.
+        max_new_tokens : int
+            Used only for generation helpers.
+
+        Returns
+        -------
+        HookedModel
+        """
+        obj = cls.__new__(cls)
+        first_param = next(model.parameters())
+        obj.model_id = model_id
+        obj.device = str(first_param.device)
+        obj.dtype = first_param.dtype
+        obj.max_new_tokens = max_new_tokens
+        obj._attach(model, tokenizer)
+        return obj
+
+    def _attach(self, model: PreTrainedModel, tokenizer: PreTrainedTokenizerBase) -> None:
+        """Bind model and tokenizer, set eval mode, and discover transformer blocks."""
+        self.tokenizer: PreTrainedTokenizerBase = tokenizer
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        self.model: PreTrainedModel = model
         self.model.eval()
 
         self._layers: List[nn.Module] = self._discover_layers()
         self.num_layers: int = len(self._layers)
         logger.info("Discovered %d transformer layers", self.num_layers)
+
+    @property
+    def layers(self) -> List[nn.Module]:
+        """Transformer blocks in forward order."""
+        return self._layers
 
     # ── layer discovery ─────────────────────────────────────────────────────
 

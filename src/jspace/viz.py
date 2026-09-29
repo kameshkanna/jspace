@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 import warnings
 import matplotlib.pyplot as plt
@@ -14,10 +14,28 @@ import seaborn as sns
 # suppress missing-glyph warnings for CJK/non-latin tokens
 warnings.filterwarnings("ignore", message="Glyph.*missing from font")
 
+from matplotlib.colors import LinearSegmentedColormap
+
+from jspace.multitoken import MultiTokenReport
 from jspace.workspace import WorkspaceReport
 
 
 _PHASE_COLORS = {"Early": "#7f8c8d", "Workspace": "#27ae60", "Output": "#e67e22"}
+
+_BLUE_RAMP = [
+    "#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
+    "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b",
+]
+_SEQUENTIAL_BLUE = LinearSegmentedColormap.from_list("jspace_blue", _BLUE_RAMP)
+_SERIES = ["#2a78d6", "#eb6834"]
+_GRID = "#d9d9d6"
+
+
+def _ordinal_blues(n: int) -> List[str]:
+    """n ordered steps of the blue ramp, starting at step 250 so the lightest line stays visible."""
+    ramp = _BLUE_RAMP[3:]
+    idx = np.linspace(0, len(ramp) - 1, max(n, 1)).round().astype(int)
+    return [ramp[i] for i in idx]
 
 
 def _safe_label(tok: str) -> str:
@@ -145,6 +163,153 @@ def plot_capacity_comparison(
     ax.axhline(25, color="#e74c3c", linestyle="--", alpha=0.6, label="paper upper bound (~25)")
     ax.legend(fontsize=8, frameon=False)
     sns.despine(ax=ax)
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    return fig
+
+
+def plot_temporal_reach(
+    reach: np.ndarray,
+    reliability: np.ndarray,
+    layer_indices: Sequence[int],
+    offsets: Sequence[int],
+    save_path: Optional[str | Path] = None,
+    figsize: tuple = (13, 7),
+) -> plt.Figure:
+    """
+    Two heatmaps over (source layer, offset): relative temporal reach and the
+    split-half reliability of each J_l^(Δ) estimate.
+
+    Reach cells show log10(||J_l^(Δ)||_F / ||J_l^(Δ0)||_F) against the first
+    offset; cells with zero reach (e.g. the final layer, where J^(Δ>0) = 0) are
+    left blank.
+
+    Parameters
+    ----------
+    reach : np.ndarray
+        (n_layers, K) unbiased norms from ``OffsetJacobianLens.temporal_reach()``.
+    reliability : np.ndarray
+        (n_layers, K) split-half cosines from ``OffsetJacobianLens.reliability()``.
+    layer_indices : Sequence[int]
+    offsets : Sequence[int]
+        At least two offsets; the first is the reference column.
+    save_path : str | Path | None
+    figsize : tuple
+
+    Returns
+    -------
+    plt.Figure
+    """
+    reach = np.asarray(reach, dtype=np.float64)
+    reliability = np.asarray(reliability, dtype=np.float64)
+    expected = (len(layer_indices), len(offsets))
+    if reach.shape != expected or reliability.shape != expected:
+        raise ValueError(f"reach {reach.shape} and reliability {reliability.shape} must be {expected}")
+    if len(offsets) < 2:
+        raise ValueError("need at least two offsets to plot relative reach")
+
+    valid = (reach[:, 1:] > 0) & (reach[:, :1] > 0)
+    log_rel = np.full(valid.shape, np.nan)
+    log_rel[valid] = np.log10((reach[:, 1:] / np.where(reach[:, :1] > 0, reach[:, :1], 1.0))[valid])
+
+    fig, (ax_reach, ax_rel) = plt.subplots(1, 2, figsize=figsize, constrained_layout=True)
+    y_labels = [f"L{layer}" for layer in layer_indices]
+    sns.heatmap(
+        log_rel,
+        cmap=_SEQUENTIAL_BLUE,
+        xticklabels=[f"Δ={o}" for o in offsets[1:]],
+        yticklabels=y_labels,
+        cbar_kws={"label": f"log10 ||J^(Δ)|| / ||J^(Δ={offsets[0]})||", "shrink": 0.7},
+        linewidths=0.4,
+        linecolor="white",
+        ax=ax_reach,
+    )
+    ax_reach.set_title("(a) Temporal reach of layer l at t on the final residual at t+Δ", fontsize=10)
+
+    sns.heatmap(
+        reliability,
+        cmap=_SEQUENTIAL_BLUE,
+        vmin=0.0,
+        vmax=1.0,
+        annot=len(layer_indices) <= 32,
+        fmt=".2f",
+        annot_kws={"fontsize": 6},
+        xticklabels=[f"Δ={o}" for o in offsets],
+        yticklabels=y_labels,
+        cbar_kws={"label": "split-half cosine", "shrink": 0.7},
+        linewidths=0.4,
+        linecolor="white",
+        ax=ax_rel,
+    )
+    ax_rel.set_title("(b) Estimate reliability (1 = signal, 0 = noise)", fontsize=10)
+
+    for ax in (ax_reach, ax_rel):
+        ax.set_xlabel("Offset", fontsize=9)
+        ax.set_ylabel("Source layer", fontsize=9)
+        ax.tick_params(axis="y", labelsize=7, rotation=0)
+        ax.tick_params(axis="x", labelsize=8)
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    return fig
+
+
+def plot_lookahead_profile(
+    report: MultiTokenReport,
+    save_path: Optional[str | Path] = None,
+    figsize: tuple = (13, 4.5),
+) -> plt.Figure:
+    """
+    Two panels: per-offset lookahead accuracy across layers, and joint vs split
+    concept counts across layers.
+
+    Parameters
+    ----------
+    report : MultiTokenReport
+    save_path : str | Path | None
+    figsize : tuple
+
+    Returns
+    -------
+    plt.Figure
+    """
+    layers = [s.layer_idx for s in report.layer_stats]
+    acc = np.stack([s.lookahead_acc.numpy() for s in report.layer_stats])
+
+    fig, (ax_acc, ax_cnt) = plt.subplots(1, 2, figsize=figsize, constrained_layout=True)
+    fig.suptitle(f'Multi-token J-space -- "{_safe_label(report.prompt[:70])}"', fontsize=11)
+
+    for color, delta, column in zip(_ordinal_blues(len(report.offsets)), report.offsets, acc.T):
+        ax_acc.plot(layers, column, color=color, linewidth=2, marker="o", markersize=3.5, label=f"Δ={delta}")
+    if report.offsets[0] == 0 and not np.isnan(float(report.baseline_acc[0])):
+        ax_acc.axhline(float(report.baseline_acc[0]), color="#52514e", linestyle="--", linewidth=1,
+                       label="model output (Δ=0)")
+    ax_acc.set_xlabel("Layer", fontsize=9)
+    ax_acc.set_ylabel("top-1 accuracy vs actual token t+Δ+1", fontsize=9)
+    ax_acc.set_title("(a) Lookahead accuracy", fontsize=10)
+    ax_acc.set_ylim(bottom=0)
+    ax_acc.legend(frameon=False, fontsize=8, ncol=2)
+
+    if report.layer_stats and report.layer_stats[0].n_joint is not None:
+        ax_cnt.plot(layers, [s.n_joint for s in report.layer_stats], color=_SERIES[0],
+                    linewidth=2, marker="o", markersize=3.5, label="joint (multi-token atoms)")
+        ax_cnt.plot(layers, [s.n_split for s in report.layer_stats], color=_SERIES[1],
+                    linewidth=2, marker="o", markersize=3.5, label="split (sum of per-offset atoms)")
+        ax_cnt.set_xlabel("Layer", fontsize=9)
+        ax_cnt.set_ylabel("mean active concepts per position", fontsize=9)
+        ax_cnt.set_title("(b) Concept count", fontsize=10)
+        ax_cnt.set_ylim(bottom=0)
+        ax_cnt.legend(frameon=False, fontsize=8)
+    else:
+        ax_cnt.axis("off")
+        ax_cnt.text(0.5, 0.5, "concept counts not computed", ha="center", va="center", fontsize=9)
+
+    for ax in (ax_acc, ax_cnt):
+        ax.grid(color=_GRID, linewidth=0.6, alpha=0.7)
+        ax.set_axisbelow(True)
+        ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True, nbins=10))
+        sns.despine(ax=ax)
 
     if save_path:
         fig.savefig(save_path, dpi=150, bbox_inches="tight")

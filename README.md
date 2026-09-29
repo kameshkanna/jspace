@@ -139,6 +139,54 @@ Full results and methodology: [results_qwen7b_vs_llama3_8b.txt](results_qwen7b_v
 
 ---
 
+## Multi-token J-space (offset-resolved lens)
+
+An extension of the J-lens above.  The paper's `J_l` averages the Jacobian over every future
+target position, which collapses *when* a residual-stream feature is used.  The offset lens
+keeps that time axis:
+
+```
+J_l^(Δ)       = E_{prompt, t} [ ∂h_final_{t+Δ} / ∂h_l_t ]        Δ ∈ {0, 1, 2, 3, 4, 6, 8}
+lens_Δ(h_l_t) = softmax(W_U · norm(J_l^(Δ) h_l_t))              → reads token t+Δ+1
+```
+
+| Component | What it computes |
+| --- | --- |
+| `OffsetJacobianLens` | `J_l^(Δ)` for every (layer, Δ) from the same backward passes: each target position gets its own Rademacher probe, comb-masked so the dominant Δ=0 term cannot leak into Δ>0. Projections are split into two independent halves, giving an unbiased temporal reach `‖J_l^(Δ)‖` and a split-half reliability score per cell. |
+| `MultiTokenWorkspace` | Latent strings (one readout per Δ at every position), lookahead accuracy against the actual token Δ+1 ahead with a repetition baseline, and joint vs per-offset concept counts over mean-centred corpus atoms. |
+| `plot_temporal_reach`, `plot_lookahead_profile` | Reach + reliability heatmaps; per-prompt lookahead and concept-count profiles. |
+
+```bash
+# fit (packs the corpus into 128-token sequences; accumulators need 2 × layers × K × d² × 4 B)
+python scripts/fit_offset_jlens.py \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --layers 14 15 16 17 18 19 20 21 22 23 24 25 26 27 \
+    --n_proj 64 \
+    --output outputs/qwen7b/offset_jlens.pt
+
+# analyse
+python scripts/run_multitoken.py \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --lens outputs/qwen7b/offset_jlens.pt \
+    --prompts_file configs/lang_pivot_prompts.txt \
+    --save_dir outputs/qwen7b/multitoken
+```
+
+**Validation.** `tests/test_offset_lens.py` checks the estimator against exact autograd Jacobians
+on a random Llama: error falls as 1/√n_proj (unbiased), the split-half reach is within 8% of the
+true norm, and the final-layer structure is recovered exactly.  `pytest` runs on CPU in ~10 s.
+
+**First result (Qwen2.5-0.5B-Instruct, 1000 prompts, n_proj=32).** Relative temporal reach is
+highest in layers 0–13 and falls sharply after layer 14.  Δ>0 latent strings do **not**
+predict future tokens (lookahead accuracy 0.00 at every layer), and this also holds for the
+exact per-instance contribution `J(t,t+Δ)·h_t` computed with forward-mode autodiff — so it is a
+property of what a position sends forward in this model, not estimator noise.  Treat Δ>0
+latent strings as unvalidated until a model shows lookahead accuracy above the reported
+baseline.  With 1000 last-token atoms, concept pursuit rarely reaches 95% coverage (see the
+`conv` column), so concept counts are dictionary-limited at this corpus size.
+
+---
+
 ## Paper
 
 Lindsey et al., "Verbalizable Representations Form a Global Workspace in Language Models", Anthropic 2026.
