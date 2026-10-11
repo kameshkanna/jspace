@@ -187,6 +187,58 @@ baseline.  With 1000 last-token atoms, concept pursuit rarely reaches 95% covera
 
 ---
 
+## Multi-token J++ lens
+
+The offset lens rebuilt on the J++ Lens recipe ([Ayonrinde & Lindsey, 2026](https://github.com/safety-research/jpp_lens)):
+
+```
+J_{l,Δ,e} = E[ ∂_LRP h_final,s+Δ / ∂h_l,s  |  h_l,s ∈ cluster e ]      e = 1..8 (k-means router)
+J_{l,Δ}   = Σ_e w_{l,Δ,e} J_{l,Δ,e}                                     weights learned per (l, Δ)
+readout_Δ(h_l,s) = top-k over semantic tokens of  W_U · norm(J_{l,Δ} h_l,s)   → token s+Δ+1
+```
+
+| Component | Role |
+| --- | --- |
+| `lrp.py` | LN / identity / half LRP rules as reversible forward patches (values unchanged, gradients become LRP coefficients) |
+| `routing.py` | normalise → centre → PCA → k-means++ activation router (Jacobian Filtering) |
+| `expert_offset_lens.py` | per-(layer, Δ, expert) Jacobians — **exact over hidden dims** (replicated forward, one-hot cotangent per row, as in J++) and unbiased over positions (random target signs + comb mask keeping Δ=0 out of Δ>0); attention-sink positions skipped |
+| `expert_weights.py` | J++ weight search on the linearised readout `W_U(g ⊙ x)`, extended to future-token targets |
+| `lookahead.py`, `scripts/run_offset_jpp.py` | held-out future-token recall vs ridge, model next-token and unigram baselines |
+| `scripts/diag_exact_contributions.py` | exact per-instance `J(s,s+Δ)·h_s` and Jacobian energy via forward-mode autodiff |
+
+```bash
+python scripts/run_offset_jpp.py --model Qwen/Qwen2.5-0.5B-Instruct \
+    --layers 6 10 14 18 21 --save_dir outputs/qwen05b/offset_jpp
+```
+
+**Result (Qwen2.5-0.5B-Instruct; 39 fit / 8 dev / 9 test packed 128-token sequences; ~800 held-out
+items per Δ; best layer per method; recall over semantic tokens).**  The exact-over-dims
+estimator has split-half cosine ≥ 0.98 at every (layer, Δ), up from 0.02–0.65 with Hutchinson
+probes, so these numbers describe the model, not estimator noise.
+
+| method | Δ=0 r@1 / r@10 | Δ=1 | Δ=2 | Δ=3 | Δ=4 |
+| --- | --- | --- | --- | --- | --- |
+| J (offset J-lens) | .341 / .601 | .006 / .023 | .004 / .011 | .002 / .006 | .001 / .001 |
+| J + expert weights | .346 / .628 | .018 / .059 | .006 / .027 | .009 / .023 | .001 / .011 |
+| R (LRP, pooled) | .274 / .529 | .008 / .041 | .007 / .019 | .005 / .006 | .004 / .007 |
+| J++ (LRP + expert weights) | .301 / .585 | .008 / .070 | .017 / .036 | .006 / .027 | .006 / .014 |
+| ridge `h_l,s → h_final,s+Δ` | .362 / .642 | .096 / .245 | .046 / .170 | .028 / .137 | .027 / .127 |
+| model's next-token guess | .407 / .697 | .013 / .091 | .002 / .047 | .006 / .037 | .011 / .038 |
+| unigram | .029 / .195 | .029 / .194 | .029 / .192 | .029 / .191 | .030 / .194 |
+
+- Expert weighting helps at every Δ (J → J+experts, R → J++); on this 0.5B model the LRP rules
+  lower Δ=0 recall.  The J++ paper's gains are on 9B–284B models and latent-variable tasks.
+- At Δ ≥ 1 every Jacobian lens stays below the unigram baseline, while the supervised ridge
+  map reads token s+2 at 3× the unigram top-1 rate.  The hidden state *contains* some
+  information about later tokens, but what a position *causally sends forward* (the Jacobian)
+  does not decode as them.
+- `diag_exact_contributions.py` shows this is not an averaging artifact: forward energy at
+  Δ ≥ 1 is concentrated in a few broadcast positions (top-10% / median up to 75×; often the
+  `\n\n` separators), yet even their exact contributions predict token s+Δ+1 at ≈ 0.
+- Ridge recall at Δ ≥ 1 is flat across layers 6–21, with no mid-layer (workspace) peak.
+
+---
+
 ## Paper
 
 Lindsey et al., "Verbalizable Representations Form a Global Workspace in Language Models", Anthropic 2026.
