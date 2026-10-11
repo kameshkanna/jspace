@@ -314,3 +314,61 @@ def plot_lookahead_profile(
     if save_path:
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
     return fig
+
+
+_METHOD_ORDER = ["J", "J+experts", "R", "J++", "ridge", "next-token", "unigram"]
+_METHOD_COLORS = dict(zip(_METHOD_ORDER, [
+    "#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7",
+]))
+
+
+def plot_offset_recall(
+    recall: dict,
+    layer_indices: Sequence[int],
+    offsets: Sequence[int],
+    k: int = 10,
+    save_path: Optional[str | Path] = None,
+) -> plt.Figure:
+    """
+    Small multiples of held-out recall@k against layer, one panel per offset.
+
+    Parameters
+    ----------
+    recall : dict[str, np.ndarray]
+        method → (n_layers, K) recall@k.
+    layer_indices : Sequence[int]
+    offsets : Sequence[int]
+    k : int
+    save_path : str | Path | None
+
+    Returns
+    -------
+    plt.Figure
+    """
+    unknown = sorted(set(recall) - set(_METHOD_COLORS))
+    if unknown:
+        raise ValueError(f"no colour for methods {unknown}")
+    n_panels = len(offsets)
+    fig, axes = plt.subplots(1, n_panels, figsize=(3.2 * n_panels + 1.5, 3.6),
+                             sharey=True, constrained_layout=True, squeeze=False)
+    y_max = max(float(np.nanmax(v)) for v in recall.values()) * 1.1 or 1.0
+    for j, (ax, delta) in enumerate(zip(axes[0], offsets)):
+        for method in [m for m in _METHOD_ORDER if m in recall]:
+            values = np.asarray(recall[method])[:, j]
+            dashed = method in ("next-token", "unigram")
+            ax.plot(layer_indices, values, color=_METHOD_COLORS[method], linewidth=2,
+                    linestyle="--" if dashed else "-", marker=None if dashed else "o",
+                    markersize=3.5, label=method)
+        ax.set_title(f"Δ={delta}  (predicts token t+{delta + 1})", fontsize=10)
+        ax.set_xlabel("Source layer", fontsize=9)
+        ax.set_xticks(list(layer_indices))
+        ax.set_ylim(0, y_max)
+        ax.grid(color=_GRID, linewidth=0.6, alpha=0.7)
+        ax.set_axisbelow(True)
+        sns.despine(ax=ax)
+    axes[0, 0].set_ylabel(f"held-out recall@{k}", fontsize=9)
+    axes[0, -1].legend(frameon=False, fontsize=8, loc="upper left", bbox_to_anchor=(1.0, 1.0))
+    fig.suptitle("Future-token readout by offset: offset J++ vs J / R lenses and baselines", fontsize=11)
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    return fig
